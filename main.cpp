@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <ranges>
 #include <functional>
@@ -19,6 +20,7 @@
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <llvm/IR/IRBuilder.h>
+#include "llvm/IR/Verifier.h"
 #pragma GCC diagnostic pop
 
 using std::string;
@@ -29,6 +31,12 @@ using std::unique_ptr;
 #else
 #define DEBUGLOG(x)
 #endif
+
+#define STRINGIZE(x) #x
+#define STRINGIZE_MACRO(x) STRINGIZE(x)
+
+#define THROW_TODO\
+    throw std::runtime_error("TODO(Line " STRINGIZE_MACRO(__LINE__) "): Not implemented yet")
 
 struct Token{
 public:
@@ -63,11 +71,10 @@ public:
         // binary
         BITWISE_OR, // beware: ||
         BITWISE_XOR,
-        BITWISE_NEG,
         AT,
         PLUS,
         MINUS, // can be unary or binary, depending on context
-        ASTERISK,
+        TIMES,
         DIV,
         MOD,
         SHIFTL,
@@ -135,15 +142,13 @@ public:
                 return "|";
             case Type::BITWISE_XOR:
                 return "^";
-            case Type::BITWISE_NEG:
-                return "~";
             case Type::AT:
                 return "@";
             case Type::PLUS:
                 return "+";
             case Type::MINUS:
                 return "-";
-            case Type::ASTERISK:
+            case Type::TIMES:
                 return "*";
             case Type::DIV:
                 return "/";
@@ -347,7 +352,7 @@ class UnexpectedTokenException :  public ParsingException {
                     type = Token::Type::MINUS;
                     break;
                 case '*':
-                    type = Token::Type::ASTERISK;
+                    type = Token::Type::TIMES;
                     break;
                 case '/':
                     type = Token::Type::DIV;
@@ -509,13 +514,19 @@ public:
         NStmtBlock, // possible children: statement*
         NStmtWhile, // possible children: expr, statement
         NStmtIf, // possible children: expr, stmt, stmt (optional else)
-        NExpr, // possible children: expr, for parenthesized exprs
-        NExprVar, // possible children: none, name: yes
+        NExprVar, // possible children: none, name: yes, op: KW_AUTO/KW_REGISTER
         NExprNum, // possible children: none, value: yes
         NExprCall, // possible children: expr*, name: yes
-        NExprUnOp, // possible children: expr, op: yes
-        NExprBinOp, // possible children: expr, expr, op: yes
+        NExprUnOp, // possible children: expr, op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
+        NExprBinOp, // possible children: expr, expr, op: yes (all the binary operators possible)
         NSubscript, // possible children: expr(addr), expr(index), num (sizespec, 1/2/4/8)
+    };
+
+    class Hash{
+        public:
+        size_t operator()(const ASTNode& node) const{
+            return std::hash<string>()(node.uniqueDotIdentifier);
+        }
     };
 
     Type type;
@@ -524,7 +535,6 @@ public:
 
     static const std::unordered_map<Type, string> nodeTypeToDotIdentifier; // initialization below
     static const std::unordered_map<Type, std::vector<string>> nodeTypeToDotStyling; // initialization below
-    static std::unordered_map<Type, llvm::GlobalObject::LinkageTypes> functionLinkageTypes; // initialization below
 
     //optional node attrs
     string name;
@@ -547,7 +557,11 @@ public:
                 return nodeTypeToDotIdentifier.at(type);
             }
         }else{
-            return nodeTypeToDotIdentifier.at(type) + ": " + name;
+            if(type == Type::NExprVar && op != Token::Type::EMPTY){
+                return  nodeTypeToDotIdentifier.at(type) + "(" + Token::toString(op) + ")" + ": " + name;
+            }else{
+                return nodeTypeToDotIdentifier.at(type) + ": " + name;
+            }
         }
     }
 
@@ -604,7 +618,6 @@ const std::unordered_map<ASTNode::Type, string> ASTNode::nodeTypeToDotIdentifier
     {ASTNode::Type::NStmtBlock,   "Block"},
     {ASTNode::Type::NStmtWhile,   "While"},
     {ASTNode::Type::NStmtIf,      "If"},
-    {ASTNode::Type::NExpr,        "Expr"},
     {ASTNode::Type::NExprVar,     "Var"},
     {ASTNode::Type::NExprNum,     "Number"},
     {ASTNode::Type::NExprCall,    "FunctionCall"},
@@ -627,7 +640,6 @@ const std::unordered_map<ASTNode::Type, std::vector<string>> ASTNode::nodeTypeTo
     {ASTNode::Type::NStmtWhile,  {"shape=rectangle"}},
 };
 
-std::unordered_map<ASTNode::Type, llvm::GlobalObject::LinkageTypes> ASTNode::functionLinkageTypes{};
 
 class AST{
 public:
@@ -676,7 +688,7 @@ public:
 static const std::unordered_map<Token::Type, std::tuple<int,bool>> operators = {
     {Token::Type::L_BRACKET,           TUP(14, false)},
     // unary: 13 (handled seperately)
-    {Token::Type::ASTERISK,            TUP(12, false)},
+    {Token::Type::TIMES,            TUP(12, false)},
     {Token::Type::DIV,                 TUP(12, false)},
     {Token::Type::MOD,                 TUP(12, false)},
     {Token::Type::PLUS,                TUP(11, false)},
@@ -982,6 +994,8 @@ private:
 
 namespace SemanticAnalysis{
     bool failed{false};
+    std::unordered_map<string, unsigned int> externalFunctionsToNumParams{};
+    std::unordered_set<string> declaredFunctions{};
 
 #define SEMANTIC_ERROR(msg) \
     std::cerr << "Semantic Analysis error: " << msg << std::endl; \
@@ -993,6 +1007,10 @@ namespace SemanticAnalysis{
     void analyzeNode(ASTNode& node, std::vector<std::tuple<string,bool>> decls = {}) noexcept {
         //checks that declaratiosn happen before use
         if(node.type == ASTNode::Type::NFunction){
+            // add to declared, remove from external
+            declaredFunctions.insert(node.name);
+            externalFunctionsToNumParams.erase(node.name);
+
             // add params to decls
             for(auto& param : node.children[0]->children){
                 decls.emplace_back(param->name, true); // parameters are considered register variables
@@ -1022,17 +1040,33 @@ namespace SemanticAnalysis{
                     SEMANTIC_ERROR(e.what());
                 }
             }
+        }else if(node.type == ASTNode::Type::NExprCall){
+            if(!declaredFunctions.contains(node.name)){
+                if(externalFunctionsToNumParams.contains(node.name)){
+                    if(externalFunctionsToNumParams[node.name] != node.children.size()){
+                        SEMANTIC_ERROR("Function \"" << node.name << "\" was once called with " << externalFunctionsToNumParams[node.name] << " arguments, but was now called with " << node.children.size() << " arguments");
+                    }
+                }else{
+                    externalFunctionsToNumParams[node.name] = node.children.size();
+                }
+            }
         }else if(node.type == ASTNode::Type::NExprVar){
             // check if var is declared
             bool found = false;
+            Token::Type foundType;
             for(auto& decl : decls){
-                if(std::get<0>(decl) == node.name){
+                auto& [declName, isRegister] = decl;
+                if(declName == node.name){
                     found = true;
+                    foundType = isRegister?Token::Type::KW_REGISTER:Token::Type::KW_AUTO;
                     break;
                 }
             }
             if(!found){
                 SEMANTIC_ERROR("Variable " + node.name + " used before declaration");
+            }else{
+                // add info about if its register/auto to node
+                node.op = foundType;
             }
         }else if((node.type == ASTNode::Type::NExprBinOp && node.op == Token::Type::ASSIGN) || (node.type == ASTNode::Type::NExprUnOp && node.op == Token::Type::AMPERSAND)){
             if(node.type == ASTNode::Type::NExprUnOp && node.children[0]->type == ASTNode::Type::NExprVar){
@@ -1062,7 +1096,6 @@ namespace SemanticAnalysis{
     }
     
     void analyze(AST& ast){
-        std::unordered_map<string, bool> decls{}; // maps name to isRegister(/parameter), uses contains to check in O(1), insert on average in O(1)
         analyzeNode(ast.root);
     }
 
@@ -1234,15 +1267,412 @@ string url_encode(const string &value) {
 // HW 4 START
 // Exceptions:
 // - main, obviously
-// - semantic analysis has been changed in order to determine the linkage of functions
+// - semantic analysis has been changed in order to determine external functions
 // ------------------------------------------------------------------------------------------------------
 
 namespace Codegen{
+    llvm::LLVMContext ctx;
+    auto moduleUP = std::make_unique<llvm::Module>("mod", ctx);
+    llvm::Type* i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::Function* currentFunction = nullptr;
+
+    struct BasicBlockInfo{
+        bool sealed{false};
+        std::vector<llvm::BasicBlock*> parents{};
+        std::unordered_map<string, llvm::Value*> varmap{};
+    };
+
+    std::unordered_map<llvm::BasicBlock*, BasicBlockInfo> blockInfo;
+
+    // TODO: can the fact that this is cached in the "earlier" varmaps lead to cache invalidation problems (someone please quote Phil Karlton)?
+    //       because of this potential problem, caching has been disabled for now, TODO enable it again after this has been thought through
+    // automatically creates phi nodes on demand
+    llvm::Value*& varmapLookup(llvm::BasicBlock* block, string& name) /* TODO add this as soon as everything is implemented: noexcept */{
+        auto& [sealed, parents, varmap] = blockInfo[block];
+        if(varmap.contains(name)){
+            return varmap[name];
+        }else{
+            if(sealed){
+                // cache it, so we don't have to look it up every time
+                if(parents.size() == 1){
+                    return varmap[name] = varmapLookup(parents[0], name);
+                }else if(parents.size() > 1){
+                    // create phi node to merge it
+                    llvm::IRBuilder<> irb(block);
+                    llvm::PHINode* phi = irb.CreatePHI(i64, parents.size(), name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
+                    varmap[name] = phi;
+                    
+                    // block is sealed -> we have all the information -> we can add all the incoming values
+                    for(auto& parent: parents){
+                        phi->addIncoming(varmapLookup(parent, name),parent);
+                    }
+                    return varmap[name];
+                }else{
+                    //TODO think about this case again
+                    throw std::runtime_error("Sealed block without parents was queried for undefined variable");
+                }
+            }else{
+                // we need a phi node in this case
+                // TODO maybe use another value for num reserved values here, if possible
+                // can there be multiple IRBs? like this?:
+                llvm::IRBuilder<> irb(block);
+                llvm::PHINode* phi = irb.CreatePHI(i64, parents.size(), name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
+                varmap[name] = phi;
+                for(unsigned i = 0; i < parents.size(); ++i){
+                    phi->setIncomingBlock(i, parents[i]);
+                }
+                return varmap[name];
+            }
+        }
+    }
+
+    llvm::Value*& varmapLookup(llvm::BasicBlock* block, llvm::StringRef name) /* TODO add this as soon as everything is implemented: noexcept */{
+        string stringName{name.str()}; // TODO is it okay that the lifetime of this is just this function? Should be, right? Because the map saves the key independently anyway and for the time of the lookup, the string is still alive
+        return varmapLookup(block, stringName); // for whatever reason, using name.str() directly resuts in it calling itself...
+    }
+
+    //just for convenience
+    inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, string& name, llvm::Value* val){
+        auto& [sealed, parents, varmap] = blockInfo[block];
+        return varmap[name] = val;
+    }
+    inline llvm::Value*& updateVarmap(llvm::IRBuilder<>& irb, string& name, llvm::Value* val){
+        return updateVarmap(irb.GetInsertBlock(), name, val);
+    }
+
+    // fills phi nodes with correct values, assumes block is sealed
+    inline void fillPhis(llvm::BasicBlock* block){
+        auto& [sealed, parents, varmap] = blockInfo[block];
+        for(auto& phi: block->phis()){
+            for(unsigned i = 0; i < parents.size(); i++){
+                phi.setIncomingValue(i, varmapLookup(parents[i], phi.getName()));
+            }
+        }
+    }
+    
+    // Seals the block and fills phis
+    inline void sealBlock(llvm::BasicBlock* block){
+        auto& [sealed, parents, varmap] = blockInfo[block];
+        sealed = true;
+        fillPhis(block);
+    }
+
+#define PARLIST(x) std::vector<llvm::Type*>(x, i64),
+
+
+    llvm::Value* genExpr(ASTNode& exprNode, llvm::IRBuilder<>& irb){
+        switch(exprNode.type){
+            case ASTNode::Type::NExprVar:
+                // TODO do different things depending on if its a register/auto var
+                // TODO this should be what we want for register vars, for auto vars we aditionally need to look up the alloca and store it back
+                // TODO this is not enough, we need to be able too possibly look up parent vars
+                return varmapLookup(irb.GetInsertBlock(), exprNode.name); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer is gone, nothing is changed about what it's pointing to.
+
+            case ASTNode::Type::NExprNum:
+                return llvm::ConstantInt::get(i64, exprNode.value);
+            case ASTNode::Type::NExprCall:
+                {
+                    // TODO when i create this, does it copy the args vector? Because its lifetime is limited to this function, so if it doesnt, thats a problem
+                    std::vector<llvm::Value*> args(exprNode.children.size());
+                    for(unsigned int i = 0; i < exprNode.children.size(); ++i){
+                        args[i] = genExpr(*exprNode.children[i], irb);
+                    }
+                    return irb.CreateCall(currentFunction, args);
+                }
+            case ASTNode::Type::NExprUnOp:
+                {
+                    auto& operandNode = *exprNode.children[0];
+                    auto operand = genExpr(operandNode, irb);
+                    switch(exprNode.op){
+                        //can be TILDE, MINUS, AMPERSAND, LOGICAL_NOT
+                        case Token::Type::TILDE:
+                            return irb.CreateNot(operand); //i hope this is the right kind of not
+                            break;
+                        case Token::Type::MINUS:
+                            return irb.CreateNeg(operand);
+                        case Token::Type::LOGICAL_NOT:
+                            {
+                                // this seems incredibly stupid, i hope its fine
+                                // TODO should this be an i1? or do we just keep to i64 all the way through?
+                                //  after a bit of thinking: I think it's more adivsable to keep everything an i64 until it's absolutely necessary to convert it to an i1. Allows the operations that the language defines etc.
+                                auto cmp = irb.CreateICmp(llvm::CmpInst::Predicate::ICMP_EQ, operand, irb.getInt64(0));
+                                return irb.CreateSelect(cmp, irb.getInt1(true), irb.getInt1(false));
+                            }
+                        case Token::Type::AMPERSAND:
+                            //TODO
+                            // get the alloca
+                            // then somehow get the address from that/ a ptr type obj pointing to it
+                            throw std::runtime_error("Not implemented yet");
+                        default:
+                            throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as unary operator");
+                    }
+                }
+            case ASTNode::Type::NExprBinOp:
+                {
+                    auto& lhsNode = *exprNode.children[0];
+                    auto& rhsNode = *exprNode.children[1];
+                    auto lhs = genExpr(lhsNode, irb);
+                    auto rhs = genExpr(rhsNode, irb);
+                    //TODO before this switch and CRUCIALLY!!! before the lhs gets evaluated, check if exprNode.op is an assign and if the left hand side is a subscript. in that case, we need to generate a store instruction for the assignment
+                    switch(exprNode.op){
+                        case Token::Type::BITWISE_OR:
+                            return irb.CreateOr(lhs,rhs);
+                        case Token::Type::BITWISE_XOR:
+                            return irb.CreateXor(lhs,rhs);
+                        case Token::Type::AMPERSAND:
+                            return irb.CreateAnd(lhs,rhs);
+                        case Token::Type::PLUS:
+                            return irb.CreateAdd(lhs,rhs);
+                        case Token::Type::MINUS:
+                            return irb.CreateSub(lhs,rhs);
+                        case Token::Type::TIMES:
+                            return irb.CreateMul(lhs,rhs);
+                        case Token::Type::DIV:
+                            return irb.CreateSDiv(lhs,rhs);
+                        case Token::Type::MOD:
+                            return irb.CreateSRem(lhs,rhs);
+                        case Token::Type::SHIFTL:
+                            return irb.CreateShl(lhs,rhs);
+                        case Token::Type::SHIFTR:
+                            return irb.CreateAShr(lhs,rhs);
+                        case Token::Type::LESS:
+                            return irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs);
+                        case Token::Type::GREATER:
+                            return irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs);
+                        case Token::Type::LESS_EQUAL:
+                            return irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs);
+                        case Token::Type::GREATER_EQUAL:
+                            return irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs);
+                        case Token::Type::EQUAL:
+                            return irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs);
+                        case Token::Type::NOT_EQUAL:
+                            return irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs);
+                        case Token::Type::LOGICAL_AND:
+                            // TODO this is kinda right, but also kinda not: These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
+                            // TODO
+                            return irb.CreateLogicalAnd(lhs,rhs); //i have no idea how this works, cant find a 'logical and' instruction...
+                        case Token::Type::LOGICAL_OR:
+                            return irb.CreateLogicalOr(lhs,rhs); //i have no idea how this works, cant find a 'logical and' instruction...
+                        case Token::Type::ASSIGN:
+                            {
+                                // in lhs: "old" varname of the var we're assigning to -> update mapping
+                                // in rhs: value to assign to it
+                                updateVarmap(irb, lhsNode.name, rhs);
+
+                                //TODO is this enough? NO! READ ABOVE!
+
+                                // return rhs
+                                return rhs;
+                            }
+                            break;
+                        default:
+                            throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as binary operator");
+                    }
+                }
+            case ASTNode::Type::NSubscript:
+                {
+                    //this can *ONLY* be a "load" (getelementpointer) subscript, store has been handled in the special case for assignments above
+                    auto& addrNode = *exprNode.children[0];
+                    auto& indexNode = *exprNode.children[1];
+                    auto& subscriptNode = *exprNode.children[2];
+
+                    auto addr = genExpr(addrNode, irb);
+                    auto index = genExpr(indexNode, irb);
+                    auto& subscriptInt = subscriptNode.value;
+
+                    // TODO i hope the addr here is right
+                    // TODO is there any endianness problem here?
+                    llvm::Type* type;
+                    if(subscriptInt == 1){
+                        type = irb.getInt8Ty();
+                    }else if(subscriptInt == 2){
+                        type = irb.getInt16Ty();
+                    }else if(subscriptInt == 4){
+                        type = irb.getInt32Ty();
+                    }else if(subscriptInt == 8){
+                        type = irb.getInt64Ty();
+                    }else{
+                        throw std::runtime_error("Something has gone seriously wrong here, got a subscript of " + std::to_string(subscriptInt) + " bytes");
+                    }
+                    auto getelementpointer = irb.CreateGEP(type, addr, {index});
+                    auto load = irb.CreateLoad(type, getelementpointer);
+
+                    //we only have i64s, thus we need to convert our extracted value back to an i64
+                    // TODO which one of these is right? Does it even matter?
+                    //  after reading up on it (in the source code... Why can't they just document this stuff properly?), it seems that CreateIntCast is a wrapper around CreateSExt/CreateZExt, but in this case we know exactly what we need, so I think CreateSExt is fine.
+                    auto castResult = irb.CreateSExt(load, i64);
+                    //auto castResult = irb.CreateIntCast(load, i64, true); 
+
+                    return castResult;
+                }
+            default:
+                throw std::runtime_error("Something has gone seriously wrong here");
+        }
+    }
+
+    // TODO does having a return type here even make sense?
+    llvm::Value* genStmt(ASTNode& stmtNode, llvm::IRBuilder<>& irb){
+        switch(stmtNode.type){
+            case ASTNode::Type::NStmtDecl:
+                {
+                    auto initializer = genExpr(*stmtNode.children[1], irb);
+                    initializer->setName(stmtNode.children[0]->name); // TODO i hope this doesn't hurt performance, but it wouldn't make sense if it did
+                    if(stmtNode.op == Token::Type::KW_AUTO){
+                        // TODO can i just make an IRB here?
+                        // TODO i have to basically use a load/store every time i use this, right?
+                        //  if so: TODO do that
+                        llvm::IRBuilder<> entryIRB(currentFunction->getEntryBlock().getFirstNonPHI()); // i hope this is correct
+                        auto alloca = entryIRB.CreateAlloca(i64);
+                        auto store = irb.CreateStore(initializer, alloca);
+
+                        THROW_TODO; // TODo because of the load/store thing
+                        return blockInfo[irb.GetInsertBlock()].varmap[stmtNode.children[0]->name] = store;
+                    }else if(stmtNode.op == Token::Type::KW_REGISTER){
+                        return updateVarmap(irb, stmtNode.children[0]->name, initializer);
+                    }else{
+                        throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(stmtNode.op) + " as decl type");
+                    }
+                }
+            case ASTNode::Type::NStmtReturn:
+                return irb.CreateRet(genExpr(*stmtNode.children[0], irb));
+            case ASTNode::Type::NStmtBlock:
+                // TODO how do we handle new scopes? Can't just make a basic block for it, right?
+                //  possible answer: I think we don't really. I think its fine to simply parse it as it is, and keep it in the same BasicBlock, var declarations get overriden anyway and are already checked to be semantically valid
+                for(auto& stmt: stmtNode.children){
+                    genStmt(*stmt, irb);
+                }
+                break;
+                //THROW_TODO; // TODO what to return here?
+            case ASTNode::Type::NStmtIf:
+                {
+                    bool hasElse = stmtNode.children.size() == 3;
+
+                    llvm::BasicBlock* then = llvm::BasicBlock::Create(ctx, "", currentFunction); // TODO can this name be "then"? or can this clash?
+                    llvm::BasicBlock* cont = llvm::BasicBlock::Create(ctx, "", currentFunction);
+                    llvm::BasicBlock* els = hasElse?llvm::BasicBlock::Create(ctx, "", currentFunction) : cont;
+
+                    auto condition = genExpr(*stmtNode.children[0], irb);
+                    irb.CreateCondBr(condition, then, els);
+                    // block is now finished
+                    
+                    auto& [thenSealed, thenParents, thenVarmap] = blockInfo[then];
+                    thenSealed = true;
+                    thenParents = {irb.GetInsertBlock()};
+                    // var map is queried recursively anyway, would be a waste to copy it here
+
+                    // TODO multiple IRBs okay?
+                    llvm::IRBuilder<> thenIRB(then);
+                    genStmt(*stmtNode.children[1], thenIRB);
+
+                    thenIRB.CreateBr(cont);
+                    //now if is generated -> we can seal else
+
+                    auto& [elseSealed, elseParents, elseVarmap] = blockInfo[els];
+                    elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
+                    if(hasElse){
+                        elseParents = {irb.GetInsertBlock()};
+
+                        // TODO multiple IRBs okay?
+                        llvm::IRBuilder<> elseIRB(els);
+                        genStmt(*stmtNode.children[2], elseIRB);
+
+                        elseIRB.CreateBr(cont);
+
+                        auto& [_0, contParents, _1] = blockInfo[cont];
+                        contParents = {then, els};
+
+                    }else{
+                        auto& contParents = elseParents; // purely for readability
+                        contParents = {irb.GetInsertBlock(), then};
+                    }
+
+                    sealBlock(cont);
+
+                    // now that stuff is sealed, fill phi nodes
+
+                    fillPhis(then);
+                    fillPhis(els);
+
+                    // now that we've generated the if, we can 'preceed as before' in the parent call, so just set the irb to the right place
+                    irb.SetInsertPoint(cont);
+
+                    //THROW_TODO; // TODO what to return here?
+                }
+                break;
+            case ASTNode::Type::NStmtWhile:
+                // TODO
+                break;
+
+            case ASTNode::Type::NExprVar:
+            case ASTNode::Type::NExprNum:
+            case ASTNode::Type::NExprCall:
+            case ASTNode::Type::NExprUnOp:
+            case ASTNode::Type::NExprBinOp:
+            case ASTNode::Type::NSubscript:
+                return genExpr(stmtNode, irb);
+
+
+                //hopefully impossible
+            default:
+                throw std::runtime_error("Something has gone seriously wrong here" STRINGIZE_MACRO(__LINE__));
+        }
+        //std::cout << "Node: " << stmtNode.toString() << std::endl;
+        //THROW_TODO; // TODO what to return here?
+    }
+
+    llvm::BasicBlock* genBasicBlock(ASTNode& blockNode, llvm::IRBuilder<>& irb){
+        for(auto& stmt : blockNode.children){
+            genStmt(*stmt, irb); //these can also return blocks... what to do then?
+        }
+        return irb.GetInsertBlock();
+    }
+
+    //TODO this return type (and whole function) has problems: a blockNode very rarely corresponds to a basic block..., usually it produces many!
+    llvm::BasicBlock* genBasicBlock(ASTNode& blockNode){
+        llvm::BasicBlock* block = llvm::BasicBlock::Create(ctx, "", currentFunction); // TODO i hope this uses the in built label counter, https://llvm.org/docs/LangRef.html#id1639 is not clear about this
+        llvm::IRBuilder<> irb(block);
+        return genBasicBlock(blockNode, irb);
+    }
+
+    void genFunction(ASTNode& fnNode){
+        auto paramNum = fnNode.children[0]->children.size();
+        // constructing this every time would be horribly inefficient, so cache it up until 10 params
+        auto typelist = std::vector<llvm::Type*>(paramNum, i64);
+        llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, typelist, false);
+        llvm::Function* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::PrivateLinkage, fnNode.name, moduleUP.get()); //TODO is private linkage correct?
+        currentFunction = fn;
+        llvm::BasicBlock* entryBB = llvm::BasicBlock::Create(ctx, "entry", fn); // is this fine? do the labels have to have unique names only inside the function or inside the module?
+        //TODO do i need to do anything with the entry block here? I can just use .getEntryBlock() on the fn, when I need to add decls, right?
+        blockInfo[entryBB].sealed = true;
+        llvm::IRBuilder<> irb(entryBB);
+        for(unsigned int i = 0; i < paramNum; i++){
+            llvm::Argument* arg = fn->getArg(i);
+            auto& name = fnNode.children[0]->children[i]->name;
+            arg->setName(name);
+            updateVarmap(irb, name, arg);
+
+        }
+
+        genBasicBlock(*fnNode.children[1], irb);
+        // TODO there can and will almost always be more than one basic block in a function...
+    }
+
+    void genRoot(ASTNode& root){
+        for(auto& [fnName, fnParamCount]: SemanticAnalysis::externalFunctionsToNumParams){
+            std::vector<llvm::Type*> params(fnParamCount, i64);
+            llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, params, false);
+            llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnName, moduleUP.get()); // TODO is this enough for external functions?
+        }
+
+        auto& children = root.children;
+
+        for(auto& child:children){
+            genFunction(*child);
+        }
+    }
+
     void generate(AST& ast){
         //example code
-        llvm::LLVMContext ctx;
-        auto moduleUP = std::make_unique<llvm::Module>("mod", ctx);
-        llvm::Type* i64 = llvm::Type::getInt64Ty(ctx);
 
         //llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, {i64}, false);
         //llvm::Function* fn = llvm::Function::Create(fnTy,
@@ -1252,41 +1682,15 @@ namespace Codegen{
         //llvm::Value* add = irb.CreateAdd(fn->getArg(0), irb.getInt64(1));
         //irb.CreateRet(add);
 
+        genRoot(ast.root);
 
-        auto& children = ast.root.children;
-        for(auto& child:children){
-            switch(child->type){
-                case ASTNode::Type::NFunction:
-                    {
-                        auto& paramlist = child->children[0];
-                        auto& typelist = paramlist.map([](auto& _){return i64;}); //i hope this isn't horribly inefficient (it is, isn't it?) TODO maybe cache size 1-10 for these lists
-                        llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, typelist);
-                        //llvm::Function* fn = llvm::Function::Create(fnTy,
-                    }
-                    break;
-                case ASTNode::Type::NParamList:
-                case ASTNode::Type::NStmtDecl:
-                case ASTNode::Type::NStmtReturn:
-                case ASTNode::Type::NStmtBlock:
-                case ASTNode::Type::NStmtWhile:
-                case ASTNode::Type::NStmtIf:
-                case ASTNode::Type::NExpr:
-                case ASTNode::Type::NExprVar:
-                case ASTNode::Type::NExprNum:
-                case ASTNode::Type::NExprCall:
-                case ASTNode::Type::NExprUnOp:
-                case ASTNode::Type::NExprBinOp:
-                case ASTNode::Type::NSubscript:
-                    break;
-                    //impossible (hopfully :monkaGiga:) :
-                case ASTNode::Type::NRoot:
-                    break;
-            }
+        for(auto& fn : moduleUP->getFunctionList()){
+            llvm::verifyFunction(fn, &llvm::errs());
         }
-
         // TODO change this to the correct output stream at the end
-        //moduleUP->print(llvm::outs(), nullptr);
+        moduleUP->print(llvm::outs(), nullptr);
     }
+
 }
 
 

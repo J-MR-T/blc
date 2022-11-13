@@ -20,6 +20,7 @@
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Verifier.h>
 #pragma GCC diagnostic pop
 
@@ -735,6 +736,9 @@ public:
             tok.assertToken(Token::Type::SEMICOLON);
             auto decl = std::make_unique<ASTNode>(ASTNode::Type::NStmtDecl, "", registerOrAuto);
             decl->children.push_back(std::make_unique<ASTNode>(ASTNode::Type::NExprVar, varName.data(), registerOrAuto));
+
+            DEBUGLOG("for declaration of " << decl->children[0]->name << ": decl op: " << Token::toString(decl->op) << ", var op: " << Token::toString(decl->children[0]->op));
+
             decl->children.push_back(std::move(initializer));
             return decl;
         }
@@ -1050,23 +1054,24 @@ namespace SemanticAnalysis{
                     externalFunctionsToNumParams[node.name] = node.children.size();
                 }
             }
+            for(auto& arg : node.children){
+                analyzeNode(*arg,decls);
+            }
         }else if(node.type == ASTNode::Type::NExprVar){
             // check if var is declared
             bool found = false;
-            Token::Type foundType;
             for(auto& decl : decls){
                 auto& [declName, isRegister] = decl;
                 if(declName == node.name){
                     found = true;
-                    foundType = isRegister?Token::Type::KW_REGISTER:Token::Type::KW_AUTO;
+                    // add info about if its register/auto to node
+                    node.op = isRegister?Token::Type::KW_REGISTER:Token::Type::KW_AUTO;
+                    DEBUGLOG("found var \"" << node.name << "\", added op: " << Token::toString(node.op));
                     break;
                 }
             }
             if(!found){
                 SEMANTIC_ERROR("Variable " + node.name + " used before declaration");
-            }else{
-                // add info about if its register/auto to node
-                node.op = foundType;
             }
         }else if((node.type == ASTNode::Type::NExprBinOp && node.op == Token::Type::ASSIGN) || (node.type == ASTNode::Type::NExprUnOp && node.op == Token::Type::AMPERSAND)){
             if(node.type == ASTNode::Type::NExprUnOp && node.children[0]->type == ASTNode::Type::NExprVar){
@@ -1097,6 +1102,12 @@ namespace SemanticAnalysis{
     
     void analyze(AST& ast){
         analyzeNode(ast.root);
+    }
+
+    void reset(){
+        failed = false;
+        declaredFunctions.clear();
+        externalFunctionsToNumParams.clear();
     }
 
 }
@@ -1268,6 +1279,7 @@ string url_encode(const string &value) {
 // Exceptions:
 // - main, obviously
 // - semantic analysis has been changed in order to determine external functions
+// - other minor changes in the parser
 // ------------------------------------------------------------------------------------------------------
 
 namespace Codegen{
@@ -1398,7 +1410,7 @@ namespace Codegen{
                 }else if(exprNode.op == Token::Type::KW_AUTO){
                     return irb.CreateLoad(i64, varmapLookup(irb.GetInsertBlock(), exprNode.name), exprNode.name);
                 }else{
-                    throw std::runtime_error("Something has gone seriously wrong here, got a variable node wich is neither register nor auto");
+                    throw std::runtime_error("Something has gone seriously wrong here, got a variable node wich is neither register nor auto, its is " + exprNode.toString());
                 }
 
             case ASTNode::Type::NExprNum:
@@ -1469,6 +1481,8 @@ namespace Codegen{
                         }
                     }
                     auto lhs = genExpr(lhsNode, irb);
+
+                    // for all cases except the assign this is a post order traversal of the epxr tree
 
                     switch(exprNode.op){
                         case Token::Type::BITWISE_OR:
@@ -1591,9 +1605,12 @@ namespace Codegen{
                 {
                     bool hasElse = stmtNode.children.size() == 3;
 
-                    llvm::BasicBlock* then = llvm::BasicBlock::Create(ctx, "", currentFunction); // TODO can this name be "then"? or can this clash?
-                    llvm::BasicBlock* cont = llvm::BasicBlock::Create(ctx, "", currentFunction);
-                    llvm::BasicBlock* els = hasElse?llvm::BasicBlock::Create(ctx, "", currentFunction) : cont;
+                    llvm::BasicBlock* then =         llvm::BasicBlock::Create(ctx, "then", currentFunction); // TODO can this name be "then"? or can this clash?
+                    llvm::BasicBlock* els  = hasElse?llvm::BasicBlock::Create(ctx, "else", currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
+                    llvm::BasicBlock* cont =         llvm::BasicBlock::Create(ctx, "cont", currentFunction);
+                    if(!hasElse){
+                        els = cont;
+                    }
 
                     auto condition = genExpr(*stmtNode.children[0], irb);
                     irb.CreateCondBr(condition, then, els);
@@ -1604,21 +1621,19 @@ namespace Codegen{
                     thenParents = {irb.GetInsertBlock()};
                     // var map is queried recursively anyway, would be a waste to copy it here
 
-                    // TODO multiple IRBs okay?
                     llvm::IRBuilder<> thenIRB(then);
                     genStmt(*stmtNode.children[1], thenIRB);
                     bool thenBranchesToCont = !(thenIRB.GetInsertBlock()->getTerminator());
                     if(thenBranchesToCont){
                         thenIRB.CreateBr(cont);
                     }
-                    //now if is generated -> we can seal else
+                    // now if is generated -> we can seal else
 
                     auto& [elseSealed, elseParents, elseVarmap] = blockInfo[els];
                     elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
                     if(hasElse){
                         elseParents = {irb.GetInsertBlock()};
 
-                        // TODO multiple IRBs okay?
                         llvm::IRBuilder<> elseIRB(els);
                         genStmt(*stmtNode.children[2], elseIRB);
 
@@ -1657,7 +1672,16 @@ namespace Codegen{
             case ASTNode::Type::NExprUnOp:
             case ASTNode::Type::NExprBinOp:
             case ASTNode::Type::NSubscript:
-                genExpr(stmtNode, irb);
+                // this can lead to empty blocks. because assignments don't necessarily really generate instructions, if the only thing in the block is an assignment, it can be empty. We need to somehow forefully insert the instruction
+
+                irb.CreateIntrinsic(llvm::Intrinsic::donothing, {}, {}); // TODO this looks very hacky currently, but inserting the generated expression doesn't work either
+                DEBUGLOG("Inserted donothing intrinsic to prevent empty blocks, did it work: " << !irb.GetInsertBlock()->empty());
+                // inserted manually here, so assignments actually fill blocks with stuff
+                // TODO this seems kinda wrong
+                //irb.Insert(
+                        genExpr(stmtNode, irb)
+                        //)
+                        ; 
                 break;
 
 
@@ -1679,13 +1703,12 @@ namespace Codegen{
 
     void genFunction(ASTNode& fnNode){
         auto paramNum = fnNode.children[0]->children.size();
-        // constructing this every time would be horribly inefficient, so cache it up until 10 params
-        auto typelist = std::vector<llvm::Type*>(paramNum, i64);
+        auto typelist = llvm::SmallVector<llvm::Type*, 8>(paramNum, i64);
         llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, typelist, false);
         llvm::Function* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::PrivateLinkage, fnNode.name, moduleUP.get()); //TODO is private linkage correct?
         currentFunction = fn;
         llvm::BasicBlock* entryBB = llvm::BasicBlock::Create(ctx, "entry", fn); // is this fine? do the labels have to have unique names only inside the function or inside the module?
-        //TODO do i need to do anything with the entry block here? I can just use .getEntryBlock() on the fn, when I need to add decls, right?
+        // simply use getEntryBlock() on the fn when declarations need to be added
         blockInfo[entryBB].sealed = true;
         llvm::IRBuilder<> irb(entryBB);
         for(unsigned int i = 0; i < paramNum; i++){
@@ -1698,6 +1721,19 @@ namespace Codegen{
 
         auto& blockNode = *fnNode.children[1];
         genStmts(blockNode.children, irb);
+
+        auto insertBlock = irb.GetInsertBlock();
+        if(insertBlock->hasNUses(0) && insertBlock!=&currentFunction->getEntryBlock()){
+            // if the block is unused (for example unreachable because of return statements in all theoretical predecessors), we discard it
+            insertBlock->eraseFromParent(); // unlink and delete block
+        }else if(insertBlock->empty() || (insertBlock->getTerminator() == nullptr)){
+            // if the block is empty, or otherwise doesn't have a terminator, we need to either delete the block (happend in the case where its not used, above), or add one, this case:
+            // This should only be possible if the block is the last block in the function anyway, all other blocks should always branch or return
+            // in this case the block is reachable, but either empty or without terminator
+            // I tried to find it in the C standard, but I couldn't find any defined behavior about functions with return types not returning, undefined behavior galore
+            // clang simply inserts an unreachable here (even though it is totally reachable, we have in fact proven at this point, that if its empty, it has at least has >0 uses, and otherwise it should always have uses), so that's what we'll do too
+            irb.CreateUnreachable();
+        }
     }
 
     void genRoot(ASTNode& root){
@@ -1805,7 +1841,7 @@ int main(int argc, char *argv[])
         auto semanalyzeStart = std::chrono::high_resolution_clock::now();
         if(!args.contains(ArgParse::possible[7])){
             for(int i = 0; i<iterations; i++){
-                SemanticAnalysis::failed = false;
+                SemanticAnalysis::reset();
                 SemanticAnalysis::analyze(*ast);
             }
         }

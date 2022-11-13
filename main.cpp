@@ -478,6 +478,12 @@ class UnexpectedTokenException :  public ParsingException {
         }
     }
 
+    void assertNotToken(Token::Type type, bool advance = true){
+        if(matchToken(type, advance)){
+            throw UnexpectedTokenException(*this, type);
+        }
+    }
+
     //only used for performance tests with multiple iterations
     void reset(){
         matched = emptyToken;
@@ -844,10 +850,10 @@ public:
             if(tok.matchToken(Token::Type::L_PAREN)){
                 auto call = std::make_unique<ASTNode>(ASTNode::Type::NExprCall);
                 call->name = ident;
-                while(true){
+                while(!tok.matchToken(Token::Type::R_PAREN)){
                     call->children.emplace_back(parseExpr());
                     if(tok.matchToken(Token::Type::COMMA)){
-                        tok.assertToken(Token::Type::IDENTIFIER, false);
+                        tok.assertNotToken(Token::Type::R_PAREN, false);
                     }else if(tok.matchToken(Token::Type::R_PAREN)){
                         break;
                     }else{
@@ -1296,10 +1302,21 @@ namespace Codegen{
 
     std::unordered_map<llvm::BasicBlock*, BasicBlockInfo> blockInfo;
 
+    llvm::Function* findFunction(string name){
+        auto fnIt = llvm::find_if(moduleUP->functions(), [&name](auto& func){return func.getName() == name;});
+        if(fnIt == moduleUP->functions().end()){
+            return nullptr;
+        }else{
+            return &*fnIt;
+        }
+    }
+
     // TODO: can the fact that this is cached in the "earlier" varmaps lead to cache invalidation problems (someone please quote Phil Karlton)?
     //       because of this potential problem, caching has been disabled for now, TODO enable it again after this has been thought through
+    //       I'm now pretty certain that this is not a problem and we do in fact want to only update the current varmap and not the parent ones,
+    //       so no cache invalidation problems
     // automatically creates phi nodes on demand
-    llvm::Value*& varmapLookup(llvm::BasicBlock* block, string& name) /* TODO add this as soon as everything is implemented: noexcept */{
+    llvm::Value*& varmapLookup(llvm::BasicBlock* block, string& name) noexcept {
         auto& [sealed, parents, varmap] = blockInfo[block];
         if(varmap.contains(name)){
             return varmap[name];
@@ -1324,8 +1341,8 @@ namespace Codegen{
                     }
                     return varmap[name] = phi;
                 }else{
-                    //TODO think about this case again
-                    throw std::runtime_error("Sealed block without parents was queried for undefined variable");
+                    // returning poison is quite reasonable, as anything here should never be used
+                    return varmap[name] = llvm::PoisonValue::get(i64);
                 }
             }else{
                 // we need a phi node in this case
@@ -1346,22 +1363,23 @@ namespace Codegen{
         }
     }
 
-    llvm::Value*& varmapLookup(llvm::BasicBlock* block, llvm::StringRef name) /* TODO add this as soon as everything is implemented: noexcept */{
+    llvm::Value*& varmapLookup(llvm::BasicBlock* block, llvm::StringRef name) noexcept{
         string stringName{name.str()}; // TODO is it okay that the lifetime of this is just this function? Should be, right? Because the map saves the key independently anyway and for the time of the lookup, the string is still alive
         return varmapLookup(block, stringName); // for whatever reason, using name.str() directly resuts in it calling itself...
     }
 
     //just for convenience
-    inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, string& name, llvm::Value* val){
+    inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, string& name, llvm::Value* val) noexcept{
         auto& [sealed, parents, varmap] = blockInfo[block];
         return varmap[name] = val;
     }
-    inline llvm::Value*& updateVarmap(llvm::IRBuilder<>& irb, string& name, llvm::Value* val){
+
+    inline llvm::Value*& updateVarmap(llvm::IRBuilder<>& irb, string& name, llvm::Value* val) noexcept{
         return updateVarmap(irb.GetInsertBlock(), name, val);
     }
 
     // fills phi nodes with correct values, assumes block is sealed
-    inline void fillPHIs(llvm::BasicBlock* block){
+    inline void fillPHIs(llvm::BasicBlock* block) noexcept{
         auto& [sealed, parents, varmap] = blockInfo[block];
         for(auto& phi: block->phis()){
             for(unsigned i = 0; i < parents.size(); i++){
@@ -1377,12 +1395,7 @@ namespace Codegen{
         fillPHIs(block);
     }
 
-#define PARLIST(x) std::vector<llvm::Type*>(x, i64),
-
-
     llvm::Type* sizespecToLLVMType(ASTNode& sizespecNode, llvm::IRBuilder<>& irb){
-        // TODO i hope the addr here is right
-        // TODO is there any endianness problem here?
         auto sizespecInt = sizespecNode.value;
         llvm::Type* type;
         if(sizespecInt == 1){
@@ -1403,7 +1416,6 @@ namespace Codegen{
     llvm::Value* genExpr(ASTNode& exprNode, llvm::IRBuilder<>& irb){
         switch(exprNode.type){
             case ASTNode::Type::NExprVar:
-                // TODO do different things depending on if its a register/auto var
                 if(exprNode.op == Token::Type::KW_REGISTER){
                     // this should be what we want for register vars, for auto vars we aditionally need to look up the alloca (and store it back if its an assignment, see the assignment below)
                     return varmapLookup(irb.GetInsertBlock(), exprNode.name); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer isn't the value anymore, nothing is changed about what it's pointing to.
@@ -1415,15 +1427,27 @@ namespace Codegen{
 
             case ASTNode::Type::NExprNum:
                 return llvm::ConstantInt::get(i64, exprNode.value);
-            case ASTNode::Type::NExprCall:
+            case ASTNode::Type::NExprCall: // TODO what happens when the arg numbers don't match?
                 {
                     // TODO when i create this, does it copy the args vector? Because its lifetime is limited to this function, so if it doesnt, thats a problem
                     std::vector<llvm::Value*> args(exprNode.children.size());
                     for(unsigned int i = 0; i < exprNode.children.size(); ++i){
                         args[i] = genExpr(*exprNode.children[i], irb);
                     }
-                    return irb.CreateCall(currentFunction, args);
+                    auto callee = findFunction(exprNode.name);
+                    if(callee == nullptr) throw std::runtime_error("Something has gone seriously wrong here, got a call to a function that doesn't exist, but was neither forward declared, nor implicitly declared, its name is " + exprNode.name);
+                    if(args.size() != callee->arg_size()){
+                        // from the latest C11 standard draft: "the number of arguments shall agree with the number of parameters"
+                        // (i just hope thats the same as in C89/ANSI C, can't find that standard anywhere online, Ritchie & Kernighan says this:
+                        // "The effect of the call is undefined if the number of arguments disagrees with the number of parameters in the
+                        // definition of the function", which is basically the same)
+                        // so technically this is undefined behavior (hw02.txt: "Everything else is handled as in ANSI C", hw04.txt: "note that parameters/arguments do not need to match") >:)
+                        return llvm::PoisonValue::get(i64);
+                    }else{
+                        return irb.CreateCall(&*callee, args);
+                    }
                 }
+                break;
             case ASTNode::Type::NExprUnOp:
                 {
                     auto& operandNode = *exprNode.children[0];
@@ -1440,14 +1464,16 @@ namespace Codegen{
                                 // this seems incredibly stupid, i hope its fine
                                 // TODO should this be an i1? or do we just keep to i64 all the way through?
                                 //  after a bit of thinking: I think it's more adivsable to keep everything an i64 until it's absolutely necessary to convert it to an i1. Allows the operations that the language defines etc.
-                                auto cmp = irb.CreateICmp(llvm::CmpInst::Predicate::ICMP_EQ, operand, irb.getInt64(0));
-                                return irb.CreateSelect(cmp, irb.getInt1(true), irb.getInt1(false));
+                                auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_EQ, operand, irb.getInt64(0));
+                                //return irb.CreateSelect(cmp, irb.getInt64(true), irb.getInt1(false)); thats the line we would want for a normal language
+                                return irb.CreateSelect(cmp, irb.getInt64(1), irb.getInt64(0)); // but for C like stuff...
                             }
                         case Token::Type::AMPERSAND:
-                            //TODO
-                            // get the alloca
-                            // then somehow get the address from that/ a ptr type obj pointing to it
-                            throw std::runtime_error("Not implemented yet");
+                            {
+                                // get the ptr to the alloca then cast that to an int, because everything is an i64
+                                auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode.name);
+                                return irb.CreatePtrToInt(ptr, i64);
+                            }
                         default:
                             throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as unary operator");
                     }
@@ -1471,14 +1497,15 @@ namespace Codegen{
                             // first cast, then store, so that the right amount is stored
                             // this could be done with a trunc, but that is only allowed if the type is strictly smaller, the CreateIntCast distinguishes these cases and takes care of it for us
                             auto cast = irb.CreateIntCast(rhs, type, true);
-                            auto getelementpointer = irb.CreateGEP(type, addr, {index});
-                            irb.CreateStore(cast, getelementpointer);
 
-                            return rhs; // just as before, return the result, not the store
+                            auto addrPtr = irb.CreateIntToPtr(addr, llvm::PointerType::get(ctx, 0)); //opaque ptrs galore!
+
+                            auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
+                            irb.CreateStore(cast, getelementpointer);
                         }else if(/* lhs node has to be var if we're here */ lhsNode.op == Token::Type::KW_AUTO){
                             irb.CreateStore(rhs, varmapLookup(irb.GetInsertBlock(), lhsNode.name));
-                            return rhs; // just as before, return the result, not the store
                         }
+                        return rhs; // just as before, return the result, not the store
                     }
                     auto lhs = genExpr(lhsNode, irb);
 
@@ -1505,24 +1532,40 @@ namespace Codegen{
                             return irb.CreateShl(lhs,rhs);
                         case Token::Type::SHIFTR:
                             return irb.CreateAShr(lhs,rhs);
+                        
+                        // all the following locial ops need to return i64s to conform to the C like behavior we want
+
+#define ICAST(x) irb.CreateIntCast((x), i64, false) //unsigned cast because we want 0 for false and 1 for true (instead of -1)
+
                         case Token::Type::LESS:
-                            return irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs);
+                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs));
                         case Token::Type::GREATER:
-                            return irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs);
+                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs));
                         case Token::Type::LESS_EQUAL:
-                            return irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs);
+                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs));
                         case Token::Type::GREATER_EQUAL:
-                            return irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs);
+                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs));
                         case Token::Type::EQUAL:
-                            return irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs);
+                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs));
                         case Token::Type::NOT_EQUAL:
-                            return irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs);
+                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs));
                         case Token::Type::LOGICAL_AND:
-                            // TODO this is kinda right, but also kinda not: These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
-                            // TODO
-                            return irb.CreateLogicalAnd(lhs,rhs); //i have no idea how this works, cant find a 'logical and' instruction...
+                            {
+                                // These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
+                                // but because of the C like semantics, we need to zext them back to i64 afterwards
+                                auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                                auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                                return ICAST(irb.CreateLogicalAnd(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical and' instruction...
+                            }
                         case Token::Type::LOGICAL_OR:
-                            return irb.CreateLogicalOr(lhs,rhs); //i have no idea how this works, cant find a 'logical and' instruction...
+                            {
+                                // These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
+                                // but because of the C like semantics, we need to zext them back to i64 afterwards
+                                auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                                auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                                return ICAST(irb.CreateLogicalOr(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical or' instruction...
+                            }
+#undef ICAST
                         case Token::Type::ASSIGN:
                             {
                                 // in lhs: "old" varname of the var we're assigning to -> update mapping
@@ -1532,7 +1575,6 @@ namespace Codegen{
                                 // TODO is this enough? NO! READ ABOVE!
                                 // TODO additionally: if the lhs is an auto var, we also need to generate a store instruction for it
 
-                                // return rhs
                                 return rhs;
                             }
                             break;
@@ -1547,12 +1589,21 @@ namespace Codegen{
                     auto& indexNode = *exprNode.children[1];
                     auto& sizespecNode = *exprNode.children[2];
 
-                    auto addr = genExpr(addrNode, irb); // TODO I think this has to be cast to a ptr
-                                                        // TODO what if this is an auto variable? then genExpr returns the load instruction, not sure if that's right
+                    // if the addrNode is an auto var, we need to get the alloca instr from the varmap and use that as the addrPtr, otherwise need to evaluate the addr expr and cast it to a ptr
+                    // TODO test that this works
+                    llvm::Value* addrPtr;
+                    if(addrNode.type == ASTNode::Type::NExprVar && addrNode.op == Token::Type::KW_AUTO){
+                        auto alloca = varmapLookup(irb.GetInsertBlock(), addrNode.name);
+                        addrPtr = alloca;
+                    }else{
+                        auto addr = genExpr(addrNode, irb); 
+                        addrPtr  = irb.CreateIntToPtr(addr, llvm::PointerType::get(ctx, 0)); //opaque ptrs galore!
+                    }
+
                     auto index = genExpr(indexNode, irb);
 
                     llvm::Type* type = sizespecToLLVMType(sizespecNode, irb);
-                    auto getelementpointer = irb.CreateGEP(type, addr, {index});
+                    auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
                     auto load = irb.CreateLoad(type, getelementpointer);
 
                     //we only have i64s, thus we need to convert our extracted value back to an i64
@@ -1605,6 +1656,7 @@ namespace Codegen{
             case ASTNode::Type::NStmtBlock:
                 // TODO how do we handle new scopes? Can't just make a basic block for it, right?
                 //  possible answer: I think we don't really. I think its fine to simply parse it as it is, and keep it in the same BasicBlock, var declarations get overriden anyway and are already checked to be semantically valid
+                //  actual answer: actually we do... Yes, the're overriden correctly, but the varmap needs to be updated for shadowed variables as soon as we leave the scope
                 genStmts(stmtNode.children, irb);
                 break;
             case ASTNode::Type::NStmtIf:
@@ -1618,7 +1670,8 @@ namespace Codegen{
                         els = cont;
                     }
 
-                    auto condition = genExpr(*stmtNode.children[0], irb);
+                    auto condition = genExpr(*stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1
+                    condition = irb.CreateICmp(llvm::CmpInst::ICMP_NE, condition, irb.getInt64(0));
                     irb.CreateCondBr(condition, then, els);
                     // block is now finished
                     
@@ -1680,17 +1733,11 @@ namespace Codegen{
             case ASTNode::Type::NExprSubscript:
                 // this can lead to empty blocks. because assignments don't necessarily really generate instructions, if the only thing in the block is an assignment, it can be empty. We need to somehow forefully insert the instruction
 
-                //TODO i think its not a problem anymore that this can lead to empty blocks, so remove the hacky donothing intrinsic for now.
+                // TODO i think its not a problem anymore that this can lead to empty blocks, so remove the hacky donothing intrinsic for now.
+                //  inserted here, so assignments actually fill blocks with stuff
                 //irb.CreateIntrinsic(llvm::Intrinsic::donothing, {}, {}); // TODO this looks very hacky currently, but inserting the generated expression doesn't work either
-                //DEBUGLOG("Inserted donothing intrinsic to prevent empty blocks, did it work: " << !irb.GetInsertBlock()->empty());
-                // inserted manually here, so assignments actually fill blocks with stuff
-                // TODO this seems kinda wrong
-                //irb.Insert(
-                        genExpr(stmtNode, irb)
-                        //)
-                        ; 
+                genExpr(stmtNode, irb); 
                 break;
-
 
                 //hopefully impossible
             default:
@@ -1711,19 +1758,18 @@ namespace Codegen{
     void genFunction(ASTNode& fnNode){
         auto paramNum = fnNode.children[0]->children.size();
         auto typelist = llvm::SmallVector<llvm::Type*, 8>(paramNum, i64);
-        llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, typelist, false);
-        llvm::Function* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::PrivateLinkage, fnNode.name, moduleUP.get()); //TODO is private linkage correct?
+        llvm::Function* fn = findFunction(fnNode.name);
         currentFunction = fn;
-        llvm::BasicBlock* entryBB = llvm::BasicBlock::Create(ctx, "entry", fn); // is this fine? do the labels have to have unique names only inside the function or inside the module?
+        llvm::BasicBlock* entryBB = llvm::BasicBlock::Create(ctx, "entry", fn);
         // simply use getEntryBlock() on the fn when declarations need to be added
         blockInfo[entryBB].sealed = true;
         llvm::IRBuilder<> irb(entryBB);
+
         for(unsigned int i = 0; i < paramNum; i++){
             llvm::Argument* arg = fn->getArg(i);
             auto& name = fnNode.children[0]->children[i]->name;
             arg->setName(name);
             updateVarmap(irb, name, arg);
-
         }
 
         auto& blockNode = *fnNode.children[1];
@@ -1750,7 +1796,19 @@ namespace Codegen{
             llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnName, moduleUP.get()); // TODO is this enough for external functions?
         }
 
+        // declare all functions in the file, to easily allow forward declarations
         auto& children = root.children;
+        for(auto& fnNode : children){
+            auto paramNum = fnNode->children[0]->children.size();
+            auto typelist = llvm::SmallVector<llvm::Type*, 8>(paramNum, i64);
+            llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, typelist, false);
+            llvm::Function* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnNode->name, moduleUP.get());
+            for(unsigned int i = 0; i < paramNum; i++){
+                llvm::Argument* arg = fn->getArg(i);
+                auto& name = fnNode->children[0]->children[i]->name;
+                arg->setName(name);
+            }
+        }
 
         for(auto& child:children){
             genFunction(*child);

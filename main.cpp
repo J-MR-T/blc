@@ -520,7 +520,7 @@ public:
         NExprCall, // possible children: expr*, name: yes
         NExprUnOp, // possible children: expr, op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
         NExprBinOp, // possible children: expr, expr, op: yes (all the binary operators possible)
-        NSubscript, // possible children: expr(addr), expr(index), num (sizespec, 1/2/4/8)
+        NExprSubscript, // possible children: expr(addr), expr(index), num (sizespec, 1/2/4/8)
     };
 
     class Hash{
@@ -624,7 +624,7 @@ const std::unordered_map<ASTNode::Type, string> ASTNode::nodeTypeToDotIdentifier
     {ASTNode::Type::NExprCall,    "FunctionCall"},
     {ASTNode::Type::NExprUnOp,    "UnOp"},
     {ASTNode::Type::NExprBinOp,   "BinOp"},
-    {ASTNode::Type::NSubscript,   "Subscript"},
+    {ASTNode::Type::NExprSubscript,   "Subscript"},
 };
 
 const std::unordered_map<ASTNode::Type, std::vector<string>> ASTNode::nodeTypeToDotStyling{
@@ -912,7 +912,7 @@ public:
 
                 tok.assertToken(Token::Type::R_BRACKET);
 
-                auto subscript = std::make_unique<ASTNode>(ASTNode::Type::NSubscript);
+                auto subscript = std::make_unique<ASTNode>(ASTNode::Type::NExprSubscript);
                 subscript->children.emplace_back(std::move(lhs));
                 subscript->children.emplace_back(std::move(expr));
                 subscript->children.emplace_back(std::move(num));
@@ -1087,7 +1087,7 @@ namespace SemanticAnalysis{
                 }
             }
             // lhs/only child must be subscript or identifier
-            if(node.children[0]->type != ASTNode::Type::NSubscript && node.children[0]->type != ASTNode::Type::NExprVar){
+            if(node.children[0]->type != ASTNode::Type::NExprSubscript && node.children[0]->type != ASTNode::Type::NExprVar){
                 SEMANTIC_ERROR("LHS of assignment/addrof must be a variable or subscript array access, got node which prints as: " << std::endl << node);
             }
             for(auto& child : node.children){
@@ -1461,7 +1461,7 @@ namespace Codegen{
                     //  we also need to generate a store, if the lhs is an auto variable
                     auto rhs = genExpr(rhsNode, irb);
                     if(exprNode.op == Token::Type::ASSIGN){
-                        if(lhsNode.type == ASTNode::Type::NSubscript){
+                        if(lhsNode.type == ASTNode::Type::NExprSubscript){
                             auto addr = genExpr(*lhsNode.children[0], irb); // TODO I think this has to be cast to a ptr
                                                         // TODO what if this is an auto variable? then genExpr returns the load instruction, not sure if that's right
                             auto index = genExpr(*lhsNode.children[1], irb);
@@ -1540,7 +1540,7 @@ namespace Codegen{
                             throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as binary operator");
                     }
                 }
-            case ASTNode::Type::NSubscript:
+            case ASTNode::Type::NExprSubscript:
                 {
                     //this can *ONLY* be a "load" (getelementpointer) subscript, store has been handled in the special case for assignments above
                     auto& addrNode = *exprNode.children[0];
@@ -1575,17 +1575,23 @@ namespace Codegen{
             case ASTNode::Type::NStmtDecl:
                 {
                     auto initializer = genExpr(*stmtNode.children[1], irb);
-                    initializer->setName(stmtNode.children[0]->name); // TODO i hope this doesn't hurt performance, but it wouldn't make sense if it did
+                    // TODO i hope setting names doesn't hurt performance, but it wouldn't make sense if it did
                     if(stmtNode.op == Token::Type::KW_AUTO){
                         // TODO i have to basically use a load/store every time i use this, right?
                         //  if so: TODO do that
-                        llvm::IRBuilder<> entryIRB(currentFunction->getEntryBlock().getFirstNonPHI()); // i hope this is correct
+                        auto entryBB = &currentFunction->getEntryBlock();
+                        auto nonphi = entryBB->getFirstNonPHI();
+                        llvm::IRBuilder<> entryIRB(entryBB, entryBB->getFirstInsertionPt()); // i hope this is correct
+                        if(nonphi != nullptr){
+                            entryIRB.SetInsertPoint(nonphi);
+                        }
+
                         auto alloca = entryIRB.CreateAlloca(i64); // this returns the ptr to the alloca'd memory
+                        alloca->setName(stmtNode.children[0]->name);
                         irb.CreateStore(initializer, alloca);
 
-                        THROW_TODO; // TODO because of the load/store thing
-                                    // TODO think about the next thing: Does this varmapping actually work?
-                        blockInfo[irb.GetInsertBlock()].varmap[stmtNode.children[0]->name] = alloca; // we actually want the alloca'd memory, not the initializer
+                        // TODO think about the next thing: Does this varmapping actually work?
+                        updateVarmap(irb, stmtNode.children[0]->name, alloca); // we actually want to save the ptr to the alloca'd memory, not the initializer
                     }else if(stmtNode.op == Token::Type::KW_REGISTER){
                         updateVarmap(irb, stmtNode.children[0]->name, initializer);
                     }else{
@@ -1671,11 +1677,12 @@ namespace Codegen{
             case ASTNode::Type::NExprCall:
             case ASTNode::Type::NExprUnOp:
             case ASTNode::Type::NExprBinOp:
-            case ASTNode::Type::NSubscript:
+            case ASTNode::Type::NExprSubscript:
                 // this can lead to empty blocks. because assignments don't necessarily really generate instructions, if the only thing in the block is an assignment, it can be empty. We need to somehow forefully insert the instruction
 
-                irb.CreateIntrinsic(llvm::Intrinsic::donothing, {}, {}); // TODO this looks very hacky currently, but inserting the generated expression doesn't work either
-                DEBUGLOG("Inserted donothing intrinsic to prevent empty blocks, did it work: " << !irb.GetInsertBlock()->empty());
+                //TODO i think its not a problem anymore that this can lead to empty blocks, so remove the hacky donothing intrinsic for now.
+                //irb.CreateIntrinsic(llvm::Intrinsic::donothing, {}, {}); // TODO this looks very hacky currently, but inserting the generated expression doesn't work either
+                //DEBUGLOG("Inserted donothing intrinsic to prevent empty blocks, did it work: " << !irb.GetInsertBlock()->empty());
                 // inserted manually here, so assignments actually fill blocks with stuff
                 // TODO this seems kinda wrong
                 //irb.Insert(

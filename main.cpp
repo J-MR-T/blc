@@ -1299,7 +1299,6 @@ namespace Codegen{
 
     struct BasicBlockInfo{
         bool sealed{false};
-        std::vector<llvm::BasicBlock*> parents{};
         std::unordered_map<string, llvm::Value*> varmap{};
     };
 
@@ -1320,15 +1319,18 @@ namespace Codegen{
     //       so no cache invalidation problems
     // automatically creates phi nodes on demand
     llvm::Value*& varmapLookup(llvm::BasicBlock* block, string& name) noexcept {
-        auto& [sealed, parents, varmap] = blockInfo[block];
+        auto& [sealed, varmap] = blockInfo[block];
         if(varmap.contains(name)){
             return varmap[name];
         }else{
             if(sealed){
                 // cache it, so we don't have to look it up every time
-                if(parents.size() == 1){
-                    return varmap[name] = varmapLookup(parents[0], name);
-                }else if(parents.size() > 1){
+                if(block->hasNPredecessors(1)){
+                    return varmap[name] = varmapLookup(block->getSinglePredecessor(), name);
+                }else if(block->hasNPredecessors(0)){
+                    // returning poison is quite reasonable, as anything here should never be used, or looked up (entry block case)
+                    return varmap[name] = llvm::PoisonValue::get(i64);
+                }else{ // > 1 predecessors
                     // create phi node to merge it
                     llvm::IRBuilder<> irb(block);
                     auto nonphi = block->getFirstNonPHI();
@@ -1336,16 +1338,13 @@ namespace Codegen{
                     if(nonphi!=nullptr){
                         irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                     }
-                    llvm::PHINode* phi = irb.CreatePHI(i64, parents.size(), name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
+                    llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
-                    for(auto& parent: parents){
-                        phi->addIncoming(varmapLookup(parent, name),parent);
+                    for(auto pred:llvm::predecessors(block)){
+                        phi->addIncoming(varmapLookup(pred, name), pred);
                     }
                     return varmap[name] = phi;
-                }else{
-                    // returning poison is quite reasonable, as anything here should never be used
-                    return varmap[name] = llvm::PoisonValue::get(i64);
                 }
             }else{
                 // we need a phi node in this case
@@ -1357,9 +1356,11 @@ namespace Codegen{
                 if(nonphi!=nullptr){
                     irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                 }
-                llvm::PHINode* phi = irb.CreatePHI(i64, parents.size(), name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
-                for(unsigned i = 0; i < parents.size(); ++i){
-                    phi->setIncomingBlock(i, parents[i]);
+                llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+
+                unsigned i = 0;
+                for(auto predIt = llvm::pred_begin(block); predIt!= llvm::pred_end(block); ++predIt, ++i){
+                    phi->setIncomingBlock(i, *predIt);
                 }
                 return varmap[name] = phi;
             }
@@ -1373,7 +1374,7 @@ namespace Codegen{
 
     //just for convenience
     inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, string& name, llvm::Value* val) noexcept{
-        auto& [sealed, parents, varmap] = blockInfo[block];
+        auto& [sealed, varmap] = blockInfo[block];
         return varmap[name] = val;
     }
 
@@ -1383,17 +1384,17 @@ namespace Codegen{
 
     // fills phi nodes with correct values, assumes block is sealed
     inline void fillPHIs(llvm::BasicBlock* block) noexcept{
-        auto& [sealed, parents, varmap] = blockInfo[block];
         for(auto& phi: block->phis()){
-            for(unsigned i = 0; i < parents.size(); i++){
-                phi.setIncomingValue(i, varmapLookup(parents[i], phi.getName()));
+            unsigned i = 0;
+            for(auto predIt = llvm::pred_begin(block); predIt!= llvm::pred_end(block); ++predIt, ++i){
+                phi.setIncomingValue(i, varmapLookup(*predIt, phi.getName()));
             }
         }
     }
     
     // Seals the block and fills phis
     inline void sealBlock(llvm::BasicBlock* block){
-        auto& [sealed, parents, varmap] = blockInfo[block];
+        auto& [sealed, varmap] = blockInfo[block];
         sealed = true;
         fillPHIs(block);
     }
@@ -1500,6 +1501,8 @@ namespace Codegen{
                     // 2 edge cases: assignment, and short circuiting logical ops:
                     // short circuiting logical ops: conditional evaluation
 
+                    // TODO why this doesnt work (and probably if too) is because the parent handling breaks down as soon as shit is nested. So remove the manual parent tracking and try to use LLVMs!
+                    // can get preds using: llvm::pred_begin()/ llvm::predecessors()
                     bool isAnd;
                     if((isAnd = (exprNode.op == Token::Type::LOGICAL_AND)) || exprNode.op == Token::Type::LOGICAL_OR){
                         // we need to generate conditional branches in these cases, clang does it the same way
@@ -1519,29 +1522,34 @@ namespace Codegen{
                             irb.CreateCondBr(lhsi1, cont, evRHS);
                         }
 
-                        auto& [rhsSealed, rhsParents, rhsVarmap] = blockInfo[evRHS];
+                        // create phi node *now*, because blocks might be split/etc. later
+                        irb.SetInsertPoint(cont);
+                        auto phi = irb.CreatePHI(irb.getInt1Ty(), 2);
+                        phi->addIncoming(irb.getInt1(!isAnd), startBB); // if we skipped (= short circuited), we know that the value is false if it was an and, true otherwise
+
+                        auto& [rhsSealed, rhsVarmap] = blockInfo[evRHS];
                         rhsSealed = true;
-                        rhsParents = {startBB};
                         // don't need to fill phi's for RHS later, because it cant generate phis: is sealed, and has single parent
+                        // TODO in light of the parent management debacel, think about this statement *real hard* again
+
                         // var map is queried recursively anyway, would be a waste to copy it here
 
-                        llvm::IRBuilder<> rhsIRB(evRHS);
-                        auto rhs = genExpr(rhsNode, rhsIRB);
-                        auto rhsi1 = rhsIRB.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0));
-                        auto compResult = isAnd?rhsIRB.CreateLogicalAnd(lhsi1, rhsi1):rhsIRB.CreateLogicalOr(lhsi1, rhsi1);
-                        rhsIRB.CreateBr(cont);
+                        irb.SetInsertPoint(evRHS);
+                        auto rhs = genExpr(rhsNode, irb);
+                        auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0));
+                        auto compResult = isAnd?irb.CreateLogicalAnd(lhsi1, rhsi1):irb.CreateLogicalOr(lhsi1, rhsi1);
+                        irb.CreateBr(cont);
 
-                        auto& [contSealed, contParents, contVarmap] = blockInfo[cont];
+                        auto& [contSealed, contVarmap] = blockInfo[cont];
                         contSealed = true;
-                        contParents = {startBB, evRHS};
                         // we don't need to fill the phis of this block either, because it is sealed basically from the beginning, thus any phi nodes generated are complete already
 
+                        auto rhsParentBlock = irb.GetInsertBlock();
+                        phi->addIncoming(compResult, rhsParentBlock); // otherwise, if we didnt skip, we need to know what the rhs evaluated to
+
+                        // TODO this is definitely a problem too: adding these incoming branches manually does not work, because the predecessors might differ depending on the nested generation
+
                         irb.SetInsertPoint(cont);
-
-                        auto phi = irb.CreatePHI(irb.getInt1Ty(), 2);
-                        phi->addIncoming(irb.getInt1(!isAnd), startBB); // if we skipped here (= short circuited), we know that the value is false if it was an and, true otherwise
-                        phi->addIncoming(compResult, evRHS); // otherwise we need to know what the rhs evaluated to
-
 
                         return ICAST(irb, phi);
                     };
@@ -1737,9 +1745,8 @@ namespace Codegen{
                     irb.CreateCondBr(condition, then, els);
                     // block is now finished
                     
-                    auto& [thenSealed, thenParents, thenVarmap] = blockInfo[then];
+                    auto& [thenSealed, thenVarmap] = blockInfo[then];
                     thenSealed = true;
-                    thenParents = {irb.GetInsertBlock()};
                     // var map is queried recursively anyway, would be a waste to copy it here
 
                     llvm::IRBuilder<> thenIRB(then);
@@ -1750,11 +1757,9 @@ namespace Codegen{
                     }
                     // now if is generated -> we can seal else
 
-                    auto& [elseSealed, elseParents, elseVarmap] = blockInfo[els];
+                    auto& [elseSealed, elseVarmap] = blockInfo[els];
                     elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
                     if(hasElse){
-                        elseParents = {irb.GetInsertBlock()};
-
                         llvm::IRBuilder<> elseIRB(els);
                         genStmt(*stmtNode.children[2], elseIRB);
 
@@ -1762,22 +1767,15 @@ namespace Codegen{
                         if(elseBranchesToCont){
                             elseIRB.CreateBr(cont);
                         }
-
-                        auto& [_0, contParents, _1] = blockInfo[cont];
-                        if(thenBranchesToCont) contParents.push_back(then);
-                        if(elseBranchesToCont) contParents.push_back(els);
-                    }else{
-                        auto& contParents = elseParents; // purely for readability
-                        contParents = {irb.GetInsertBlock()};
-                        if(thenBranchesToCont) contParents.push_back(then);
                     }
 
                     // now that stuff is sealed, fill phi nodes
                     sealBlock(cont);
 
                     // then/else cannot generate phi nodes, because they were sealed from the start and have a single predecessor
-                    //fillPHIs(then);
-                    //fillPHIs(els);
+                    // TODO in light of the parent management debacel, think about this statement *real hard* again
+                    fillPHIs(then);
+                    fillPHIs(els);
 
                     // now that we've generated the if, we can 'preceed as before' in the parent call, so just set the irb to the right place
                     irb.SetInsertPoint(cont); 

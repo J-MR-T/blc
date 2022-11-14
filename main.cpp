@@ -1004,7 +1004,9 @@ private:
 
 namespace SemanticAnalysis{
     bool failed{false};
-    std::unordered_map<string, unsigned int> externalFunctionsToNumParams{};
+    std::unordered_map<string, int> externalFunctionsToNumParams{};
+#define EXTERNAL_FUNCTION_VARARGS -1
+
     std::unordered_set<string> declaredFunctions{};
 
 #define SEMANTIC_ERROR(msg) \
@@ -1053,8 +1055,9 @@ namespace SemanticAnalysis{
         }else if(node.type == ASTNode::Type::NExprCall){
             if(!declaredFunctions.contains(node.name)){
                 if(externalFunctionsToNumParams.contains(node.name)){
-                    if(externalFunctionsToNumParams[node.name] != node.children.size()){
-                        SEMANTIC_ERROR("Function \"" << node.name << "\" was once called with " << externalFunctionsToNumParams[node.name] << " arguments, but was now called with " << node.children.size() << " arguments");
+                    if(externalFunctionsToNumParams[node.name] !=  static_cast<int>(node.children.size())){
+                        // we seem to have ourselves a vararg function we don't know anything about, so indicate that by setting the number of params to -1
+                        externalFunctionsToNumParams[node.name] = EXTERNAL_FUNCTION_VARARGS;
                     }
                 }else{
                     externalFunctionsToNumParams[node.name] = node.children.size();
@@ -1437,12 +1440,19 @@ namespace Codegen{
                     auto callee = findFunction(exprNode.name);
                     if(callee == nullptr) throw std::runtime_error("Something has gone seriously wrong here, got a call to a function that doesn't exist, but was neither forward declared, nor implicitly declared, its name is " + exprNode.name);
                     if(args.size() != callee->arg_size()){
-                        // from the latest C11 standard draft: "the number of arguments shall agree with the number of parameters"
+                        // hw02.txt: "Everything else is handled as in ANSI C", hw04.txt: "note that parameters/arguments do not need to match"
+                        // but: from the latest C11 standard draft: "the number of arguments shall agree with the number of parameters"
                         // (i just hope thats the same as in C89/ANSI C, can't find that standard anywhere online, Ritchie & Kernighan says this:
                         // "The effect of the call is undefined if the number of arguments disagrees with the number of parameters in the
                         // definition of the function", which is basically the same)
-                        // so technically this is undefined behavior (hw02.txt: "Everything else is handled as in ANSI C", hw04.txt: "note that parameters/arguments do not need to match") >:)
-                        return llvm::PoisonValue::get(i64);
+                        // so technically this is undefined behavior >:)
+                        if(SemanticAnalysis::externalFunctionsToNumParams.contains(exprNode.name) && SemanticAnalysis::externalFunctionsToNumParams[exprNode.name] == EXTERNAL_FUNCTION_VARARGS){
+                            // in this case we can create a normal call
+                            return irb.CreateCall(&*callee, args);
+                        }else{
+                            // otherwise, there is something weird going on
+                            return llvm::PoisonValue::get(i64);
+                        }
                     }else{
                         return irb.CreateCall(&*callee, args);
                     }
@@ -1482,14 +1492,67 @@ namespace Codegen{
                 {
                     auto& lhsNode = *exprNode.children[0];
                     auto& rhsNode = *exprNode.children[1];
+
+                        // all the following locial ops need to return i64s to conform to the C like behavior we want
+
+#define ICAST(irb, x) irb.CreateIntCast((x), i64, false) //unsigned cast because we want 0 for false and 1 for true (instead of -1)
+
+                    // 2 edge cases: assignment, and short circuiting logical ops:
+                    // short circuiting logical ops: conditional evaluation
+
+                    bool isAnd;
+                    if((isAnd = (exprNode.op == Token::Type::LOGICAL_AND)) || exprNode.op == Token::Type::LOGICAL_OR){
+                        // we need to generate conditional branches in these cases, clang does it the same way
+                        // but the lhs is always evaluated anyway, so we can just do that first
+                        auto lhs = genExpr(lhsNode, irb);
+                        auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+
+                        auto startBB = irb.GetInsertBlock();
+                        auto evRHS = llvm::BasicBlock::Create(ctx, "evRHS", currentFunction);
+                        auto cont = llvm::BasicBlock::Create(ctx, "shortCircuitCont", currentFunction);
+
+                        if(isAnd){
+                            // for an and, we need to evaluate the other side iff its true
+                            irb.CreateCondBr(lhsi1, evRHS, cont);
+                        }else{
+                            // for an or, we need to evaluate the other side iff its false
+                            irb.CreateCondBr(lhsi1, cont, evRHS);
+                        }
+
+                        auto& [rhsSealed, rhsParents, rhsVarmap] = blockInfo[evRHS];
+                        rhsSealed = true;
+                        rhsParents = {startBB};
+                        // don't need to fill phi's for RHS later, because it cant generate phis: is sealed, and has single parent
+                        // var map is queried recursively anyway, would be a waste to copy it here
+
+                        llvm::IRBuilder<> rhsIRB(evRHS);
+                        auto rhs = genExpr(rhsNode, rhsIRB);
+                        auto rhsi1 = rhsIRB.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0));
+                        auto compResult = isAnd?rhsIRB.CreateLogicalAnd(lhsi1, rhsi1):rhsIRB.CreateLogicalOr(lhsi1, rhsi1);
+                        rhsIRB.CreateBr(cont);
+
+                        auto& [contSealed, contParents, contVarmap] = blockInfo[cont];
+                        contSealed = true;
+                        contParents = {startBB, evRHS};
+                        // we don't need to fill the phis of this block either, because it is sealed basically from the beginning, thus any phi nodes generated are complete already
+
+                        irb.SetInsertPoint(cont);
+
+                        auto phi = irb.CreatePHI(irb.getInt1Ty(), 2);
+                        phi->addIncoming(irb.getInt1(!isAnd), startBB); // if we skipped here (= short circuited), we know that the value is false if it was an and, true otherwise
+                        phi->addIncoming(compResult, evRHS); // otherwise we need to know what the rhs evaluated to
+
+
+                        return ICAST(irb, phi);
+                    };
+
                     // assignment needs special handling:
                     // TODO before this switch and CRUCIALLY (!!!) before the lhs gets evaluated, check if exprNode.op is an assign and if the left hand side is a subscript. in that case, we need to generate a store instruction for the assignment
                     //  we also need to generate a store, if the lhs is an auto variable
                     auto rhs = genExpr(rhsNode, irb);
                     if(exprNode.op == Token::Type::ASSIGN){
                         if(lhsNode.type == ASTNode::Type::NExprSubscript){
-                            auto addr = genExpr(*lhsNode.children[0], irb); // TODO I think this has to be cast to a ptr
-                                                        // TODO what if this is an auto variable? then genExpr returns the load instruction, not sure if that's right
+                            auto addr = genExpr(*lhsNode.children[0], irb);
                             auto index = genExpr(*lhsNode.children[1], irb);
                             auto& sizespecNode = *lhsNode.children[2];
 
@@ -1509,7 +1572,7 @@ namespace Codegen{
                     }
                     auto lhs = genExpr(lhsNode, irb);
 
-                    // for all cases except the assign this is a post order traversal of the epxr tree
+                    // for all other cases this is a post order traversal of the epxr tree
 
                     switch(exprNode.op){
                         case Token::Type::BITWISE_OR:
@@ -1532,30 +1595,27 @@ namespace Codegen{
                             return irb.CreateShl(lhs,rhs);
                         case Token::Type::SHIFTR:
                             return irb.CreateAShr(lhs,rhs);
-                        
-                        // all the following locial ops need to return i64s to conform to the C like behavior we want
-
-#define ICAST(x) irb.CreateIntCast((x), i64, false) //unsigned cast because we want 0 for false and 1 for true (instead of -1)
 
                         case Token::Type::LESS:
-                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs));
+                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs));
                         case Token::Type::GREATER:
-                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs));
+                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs));
                         case Token::Type::LESS_EQUAL:
-                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs));
+                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs));
                         case Token::Type::GREATER_EQUAL:
-                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs));
+                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs));
                         case Token::Type::EQUAL:
-                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs));
+                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs));
                         case Token::Type::NOT_EQUAL:
-                            return ICAST(irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs));
+                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs));
+                        /* non-short circuiting variants of the logical ops
                         case Token::Type::LOGICAL_AND:
                             {
                                 // These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
                                 // but because of the C like semantics, we need to zext them back to i64 afterwards
                                 auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
                                 auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-                                return ICAST(irb.CreateLogicalAnd(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical and' instruction...
+                                return ICAST(irb,irb.CreateLogicalAnd(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical and' instruction...
                             }
                         case Token::Type::LOGICAL_OR:
                             {
@@ -1563,8 +1623,9 @@ namespace Codegen{
                                 // but because of the C like semantics, we need to zext them back to i64 afterwards
                                 auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
                                 auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-                                return ICAST(irb.CreateLogicalOr(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical or' instruction...
+                                return ICAST(irb,irb.CreateLogicalOr(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical or' instruction...
                             }
+                            */
 #undef ICAST
                         case Token::Type::ASSIGN:
                             {
@@ -1657,6 +1718,7 @@ namespace Codegen{
                 // TODO how do we handle new scopes? Can't just make a basic block for it, right?
                 //  possible answer: I think we don't really. I think its fine to simply parse it as it is, and keep it in the same BasicBlock, var declarations get overriden anyway and are already checked to be semantically valid
                 //  actual answer: actually we do... Yes, the're overriden correctly, but the varmap needs to be updated for shadowed variables as soon as we leave the scope
+                //  so: TODO!
                 genStmts(stmtNode.children, irb);
                 break;
             case ASTNode::Type::NStmtIf:
@@ -1710,12 +1772,12 @@ namespace Codegen{
                         if(thenBranchesToCont) contParents.push_back(then);
                     }
 
+                    // now that stuff is sealed, fill phi nodes
                     sealBlock(cont);
 
-                    // now that stuff is sealed, fill phi nodes
-
-                    fillPHIs(then);
-                    fillPHIs(els);
+                    // then/else cannot generate phi nodes, because they were sealed from the start and have a single predecessor
+                    //fillPHIs(then);
+                    //fillPHIs(els);
 
                     // now that we've generated the if, we can 'preceed as before' in the parent call, so just set the irb to the right place
                     irb.SetInsertPoint(cont); 
@@ -1790,9 +1852,16 @@ namespace Codegen{
     }
 
     void genRoot(ASTNode& root){
+        // declare implicitly declared functions
         for(auto& [fnName, fnParamCount]: SemanticAnalysis::externalFunctionsToNumParams){
-            std::vector<llvm::Type*> params(fnParamCount, i64);
-            llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, params, false);
+            llvm::SmallVector<llvm::Type*, 8> params;
+            if(fnParamCount == EXTERNAL_FUNCTION_VARARGS){
+                params = {};
+            }else{
+                params = llvm::SmallVector<llvm::Type*, 8>(fnParamCount, i64);
+
+            }
+            llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, params, fnParamCount == EXTERNAL_FUNCTION_VARARGS);
             llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnName, moduleUP.get()); // TODO is this enough for external functions?
         }
 

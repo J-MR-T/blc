@@ -44,6 +44,9 @@ Analysis answers:
 
 Could use the mapping of register/auto to the individual uses of the variables from semantic analysis, as well finding implicit function declarations there
 
+Obvious optimizations:
+samples/llvmAuto.b shows that llc (on both -O0 and the default optimization level, although that is better than -O0) still uses the stack for the auto variables, even though there are enough registers available and their addresses are never needed.
+This could be optimized so every auto variable is stored in a register.
 
  */
 
@@ -847,7 +850,12 @@ public:
 
         if(tok.matchToken(Token::Type::NUM)){
             auto num = std::make_unique<ASTNode>(ASTNode::Type::NExprNum);
-            num->value = std::stoi(tok.matched.value);;
+            try{
+                num->value = std::stoll(tok.matched.value);;
+            }catch(std::out_of_range& e){
+                num->value = 0;
+                std::cerr << "Line " << tok.getLineNum() << ": Warning: number " << tok.matched.value << " is out of range and will be truncated to 0" << std::endl;
+            }
             return num;
         }else if(tok.matchToken(Token::Type::TILDE)||tok.matchToken(Token::Type::MINUS)||tok.matchToken(Token::Type::LOGICAL_NOT)||tok.matchToken(Token::Type::AMPERSAND)){ 
             auto unOp = std::make_unique<ASTNode>(ASTNode::Type::NExprUnOp, "", tok.matched.type);
@@ -1366,7 +1374,8 @@ namespace Codegen{
     //       I'm now pretty certain that this is not a problem and we do in fact want to only update the current varmap and not the parent ones,
     //       so no cache invalidation problems
     // automatically creates phi nodes on demand
-    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
+    llvm::Value* varmapLookupInner(llvm::BasicBlock* block, ASTNode& node, std::unordered_set<llvm::BasicBlock*>& queried) noexcept {
+        queried.insert(block);
         string& name = node.name;
         auto& [sealed, varmap] = blockInfo[block];
         auto valueType = (node.op == Token::Type::KW_REGISTER?i64:llvm::PointerType::get(ctx, 0));
@@ -1376,7 +1385,7 @@ namespace Codegen{
             if(sealed){
                 // cache it, so we don't have to look it up every time
                 if(block->hasNPredecessors(1)){
-                    return varmap[name] = varmapLookup(block->getSinglePredecessor(), node);
+                    return varmap[name] = varmapLookupInner(block->getSinglePredecessor(), node, queried);
                 }else if(block->hasNPredecessors(0)){
                     // returning poison is quite reasonable, as anything here should never be used, or looked up (entry block case)
                     return varmap[name] = llvm::PoisonValue::get(valueType);
@@ -1392,7 +1401,9 @@ namespace Codegen{
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
                     for(auto pred:llvm::predecessors(block)){
-                        phi->addIncoming(varmapLookup(pred, node), pred);
+                        if(!queried.contains(pred)){
+                            phi->addIncoming(varmapLookupInner(pred, node, queried), pred);
+                        }
                     }
                     return varmap[name] = phi;
                 }
@@ -1406,21 +1417,19 @@ namespace Codegen{
                 }
                 llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
                 phisToResolve[phi] = &node;
-
-                // .setIncomingBlock() is very unreliable, because it does not care about the space that is actually available. So rather than:
-                //unsigned i = 0;
-                //for(auto predIt = llvm::pred_begin(block); predIt!= llvm::pred_end(block); ++predIt, ++i){
-                //    phi->setIncomingBlock(i, *predIt);
-                //}
-                // we do this:
-                for(auto pred: llvm::predecessors(block)){
-                    phi->addIncoming(llvm::UndefValue::get(valueType), pred);
-                }
-                // it's not as clean, but it does guarantee, that there is enough space etc.
+                
+                // incoming values/blocks get added by fillPHIs later
                 return varmap[name] = phi;
             }
         }
     }
+
+    // wrapper for varmapLookupInner, saves already looked up blocks
+    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
+        std::unordered_set<llvm::BasicBlock*> queried{};
+        return varmapLookupInner(block, node, queried);
+    }
+
 
     // just for convenience
     inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
@@ -1434,11 +1443,12 @@ namespace Codegen{
 
     // fills phi nodes with correct values, assumes block is sealed
     inline void fillPHIs(llvm::BasicBlock* block) noexcept{
-        llvm::IRBuilder<> irb(block);
+        //llvm::IRBuilder<> irb(block);
         for(auto& phi: block->phis()){
-            unsigned i = 0;
-            for(auto predIt = llvm::pred_begin(block); predIt!= llvm::pred_end(block); ++predIt, ++i){
-                phi.setIncomingValue(i, varmapLookup(*predIt, *(phisToResolve[&phi])));
+            for(auto pred: llvm::predecessors(block)){
+                // only avoids direct recursion, meaning cycle length 2. But bigger cycle lengths should not occur in this language, as there is  only a while, and that cannot loop in the condition, only the body and there it does not query the body itself
+                // TODO maybe replace this with a `visited` hashmap
+                phi.addIncoming(varmapLookup(pred, *(phisToResolve[&phi])), pred);
             }
         }
     }
@@ -1472,7 +1482,6 @@ namespace Codegen{
         switch(exprNode.type){
             case ASTNode::Type::NExprVar:
                 return wrapVarmapLookupForUse(irb, exprNode);
-
             case ASTNode::Type::NExprNum:
                 return llvm::ConstantInt::get(i64, exprNode.value);
             case ASTNode::Type::NExprCall: 
@@ -1525,9 +1534,7 @@ namespace Codegen{
                             }
                         case Token::Type::AMPERSAND:
                             {
-                                // get the ptr to the alloca then cast that to an int, because everything is an i64
-                                // TODO again think about if this makes sense 
-                                //      or should we use wrapVarmapLookupForUse here? I don't think so...
+                                // get the ptr to the alloca then cast that to an int, because everything (except the auto vars stored in the varmap) is an i64
                                 auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode);
                                 return irb.CreatePtrToInt(ptr, i64);
                             }
@@ -1721,7 +1728,6 @@ namespace Codegen{
 
     void genStmts(std::vector<unique_ptr<ASTNode>>& stmts, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls);
 
-    // I think this doesn't need a return type
     void genStmt(ASTNode& stmtNode, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls){
         switch(stmtNode.type){
             case ASTNode::Type::NStmtDecl:
@@ -1753,7 +1759,12 @@ namespace Codegen{
                 }
                 break;
             case ASTNode::Type::NStmtReturn:
-                irb.CreateRet(genExpr(*stmtNode.children[0], irb));
+                // technically returning "nothing" is undefined behavior, so we can just return 0 in that case
+                if(stmtNode.children.size() == 0){
+                    irb.CreateRet(irb.getInt64(0));
+                }else{
+                    irb.CreateRet(genExpr(*stmtNode.children[0], irb));
+                }
                 break;
             case ASTNode::Type::NStmtBlock:
                 // TODO how do we handle new scopes? Can't just make a basic block for it, right?
@@ -1796,60 +1807,97 @@ namespace Codegen{
                 {
                     bool hasElse = stmtNode.children.size() == 3;
 
-                    llvm::BasicBlock* then =         llvm::BasicBlock::Create(ctx, "then",   currentFunction);
-                    llvm::BasicBlock* els  = hasElse?llvm::BasicBlock::Create(ctx, "else",   currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
-                    llvm::BasicBlock* cont =         llvm::BasicBlock::Create(ctx, "ifCont", currentFunction);
+                    llvm::BasicBlock* thenBB =         llvm::BasicBlock::Create(ctx, "then",   currentFunction);
+                    llvm::BasicBlock* elseBB = hasElse?llvm::BasicBlock::Create(ctx, "else",   currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
+                    llvm::BasicBlock* contBB =         llvm::BasicBlock::Create(ctx, "ifCont", currentFunction);
                     if(!hasElse){
-                        els = cont;
+                        elseBB = contBB;
                     }
 
                     auto condition = genExpr(*stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1
                     condition = irb.CreateICmp(llvm::CmpInst::ICMP_NE, condition, irb.getInt64(0));
-                    irb.CreateCondBr(condition, then, els);
+                    irb.CreateCondBr(condition, thenBB, elseBB);
                     // block is now finished
                     
-                    auto& [thenSealed, thenVarmap] = blockInfo[then];
+                    auto& [thenSealed, thenVarmap] = blockInfo[thenBB];
                     thenSealed = true;
                     // var map is queried recursively anyway, would be a waste to copy it here
 
-                    irb.SetInsertPoint(then);
-                    std::unordered_set<std::string_view> empty{};
-                    genStmt(*stmtNode.children[1], irb, empty);
+                    irb.SetInsertPoint(thenBB);
+                    genStmt(*stmtNode.children[1], irb, scopeDecls);
                     auto thenBlock = irb.GetInsertBlock();
 
                     bool thenBranchesToCont = !(thenBlock->getTerminator());
                     if(thenBranchesToCont){
-                        irb.CreateBr(cont);
+                        irb.CreateBr(contBB);
                     }
                     // now if is generated -> we can seal else
 
-                    auto& [elseSealed, elseVarmap] = blockInfo[els];
+                    auto& [elseSealed, elseVarmap] = blockInfo[elseBB];
                     elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
                     if(hasElse){
-                        irb.SetInsertPoint(els);
-                        genStmt(*stmtNode.children[2], irb, empty);
+                        irb.SetInsertPoint(elseBB);
+                        genStmt(*stmtNode.children[2], irb, scopeDecls);
                         auto elseBlock = irb.GetInsertBlock();
 
                         bool elseBranchesToCont = !(elseBlock->getTerminator());
                         if(elseBranchesToCont){
-                            irb.CreateBr(cont);
+                            irb.CreateBr(contBB);
                         }
                     }
 
-                    // now that stuff is sealed, fill phi nodes
-                    sealBlock(cont);
+                    // now that stuff is sealed, can also seal cont
+                    blockInfo[contBB].sealed = true;
 
                     // then/else cannot generate phi nodes, because they were sealed from the start and have a single predecessor
                     // TODO in light of the parent management debacel, think about this statement *real hard* again, so this is in here for now
-                    fillPHIs(then);
-                    fillPHIs(els);
+                    fillPHIs(thenBB);
+                    fillPHIs(elseBB);
 
                     // now that we've generated the if, we can 'preceed as before' in the parent call, so just set the irb to the right place
-                    irb.SetInsertPoint(cont); 
+                    irb.SetInsertPoint(contBB); 
                 }
                 break;
             case ASTNode::Type::NStmtWhile:
-                THROW_TODO; // TODO
+                //THROW_TODO; // TODO
+                {
+                    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(ctx, "whileCond", currentFunction);
+                    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(ctx, "whileBody", currentFunction);
+                    llvm::BasicBlock* contBB = llvm::BasicBlock::Create(ctx, "whileCont", currentFunction);
+
+                    irb.CreateBr(condBB);
+                    // block is now finished
+
+                    blockInfo[condBB].sealed = false; // can get into condition block from body, which is not generated yet
+
+                    irb.SetInsertPoint(condBB);
+
+                    auto conditionExpr = genExpr(*stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1
+                    conditionExpr = irb.CreateICmp(llvm::CmpInst::ICMP_NE, conditionExpr, irb.getInt64(0));
+                    irb.CreateCondBr(conditionExpr, bodyBB, contBB);
+
+                    blockInfo[bodyBB].sealed = true; // can only get into body block from condition block -> all predecessors are known
+
+                    irb.SetInsertPoint(bodyBB);
+                    genStmt(*stmtNode.children[1], irb, scopeDecls);
+                    auto bodyBlock = irb.GetInsertBlock();
+
+                    bool bodyBranchesToCond = !(bodyBlock->getTerminator());
+                    if(bodyBranchesToCond){
+                        irb.CreateBr(condBB);
+                    }
+
+                    // seal condition now that all its predecessors (start block and body) are fully known and generated
+                    sealBlock(condBB);
+
+                    // body cannot generate phi nodes because its sealed from the start and has a single predecessor
+                    // TODO in light of the parent management debacel, think about this statement *real hard* again, so this is in here for now
+                    fillPHIs(bodyBB);
+
+                    blockInfo[contBB].sealed = true;
+
+                    irb.SetInsertPoint(contBB);
+                }
                 break;
 
             case ASTNode::Type::NExprVar:
@@ -1950,41 +1998,15 @@ namespace Codegen{
         }
     }
 
-    bool generate(AST& ast){
-        //example code
-
-        //llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, {i64}, false);
-        //llvm::Function* fn = llvm::Function::Create(fnTy,
-        //llvm::GlobalValue::ExternalLinkage, "addOne", moduleUP.get());
-        //llvm::BasicBlock* entryBB = llvm::BasicBlock::Create(ctx, "entry", fn);
-        //llvm::IRBuilder<> irb(entryBB);
-        //llvm::Value* add = irb.CreateAdd(fn->getArg(0), irb.getInt64(1));
-        //
-        //llvm::IRBuilder<> irb2(entryBB); // to see where the irb starts inserting
-        //auto maybenull = &*entryBB->getInstList().begin();
-        //if(maybenull == nullptr){
-        //    std::cout << "null" << std::endl;
-        //    exit(1);
-        //}
-        //irb2.SetInsertPoint(maybenull);
-        //// much easier alternative:
-        //irb2.SetInsertPoint(entryBB, entryBB->getFirstInsertionPt());
-        //irb2.CreateRet(fn->getArg(0));
-
-
+    bool generate(AST& ast, llvm::raw_ostream& out){
         genRoot(ast.root);
-
-        //for(auto& fn : moduleUP->getFunctionList()){
-        //    bool isErronous = llvm::verifyFunction(fn, &llvm::errs());
-        //    llvm::errs() << "Function " << fn.getName() << " is " << (isErronous ? "erronous" : "fine") << "
-        //}
 
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
         if(moduleIsBroken){
             moduleUP->print(llvm::errs(), nullptr);
         }else{
             // TODO change this to the correct output stream at the end
-            moduleUP->print(llvm::outs(), nullptr);
+            moduleUP->print(out, nullptr);
         }
         return !moduleIsBroken;
     }
@@ -2072,10 +2094,18 @@ int main(int argc, char *argv[])
                 ast->print(std::cout);
             }
         }else if(args.contains(ArgParse::possible[10])){
-            if(!(genSuccess = Codegen::generate(*ast))){
-                std::cout << "Codegen failed, errors displayed above" << std::endl;
+            if(args.contains(ArgParse::possible[3])){
+                std::error_code errorCode;
+                llvm::raw_fd_ostream outputFile{args.at(ArgParse::possible[3]), errorCode};
+                if(!(genSuccess = Codegen::generate(*ast, outputFile))){
+                    llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
+                }
+                outputFile.close();
+            }else{
+                if(!(genSuccess = Codegen::generate(*ast, llvm::outs()))){
+                    llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
+                }
             }
-            //TODO think about output method
         }
         //print execution times
         if(args.contains(ArgParse::possible[8])){

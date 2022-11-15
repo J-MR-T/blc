@@ -1258,7 +1258,7 @@ cont:
                 std::regex matchFlagShort{" -[a-zA-z]*"+arg.shortOpt};
                 std::regex matchFlagLong{" --"+arg.longOpt};
                 if(std::regex_search(argString, matchFlagShort) || std::regex_search(argString, matchFlagLong)){
-                    args[arg] = ""; //empty string for flags, will just be checked using .contains
+                    args[arg] = ""; // empty string for flags, will just be checked using .contains
                 }
             };
         }
@@ -1387,7 +1387,7 @@ namespace Codegen{
                     if(nonphi!=nullptr){
                         irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                     }
-                    llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+                    llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
                     for(auto pred:llvm::predecessors(block)){
@@ -1406,7 +1406,7 @@ namespace Codegen{
                 if(nonphi!=nullptr){
                     irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                 }
-                llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+                llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
                 phisToResolve[phi] = &node;
 
                 // .setIncomingBlock() is very unreliable, because it does not care about the space that is actually available. So rather than:
@@ -1424,7 +1424,7 @@ namespace Codegen{
         }
     }
 
-    //just for convenience
+    // just for convenience
     inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
         auto& [sealed, varmap] = blockInfo[block];
         return varmap[node.name] = val;
@@ -1440,7 +1440,7 @@ namespace Codegen{
         for(auto& phi: block->phis()){
             unsigned i = 0;
             for(auto predIt = llvm::pred_begin(block); predIt!= llvm::pred_end(block); ++predIt, ++i){
-                irb.SetInsertPoint((*predIt)->getTerminator()); //insert possible load instruction just before the terminator of the predecessor
+                irb.SetInsertPoint((*predIt)->getTerminator()); // insert possible load instruction just before the terminator of the predecessor
                 phi.setIncomingValue(i, wrapVarmapLookupForUse(irb, *(phisToResolve[&phi])));
             }
         }
@@ -1510,9 +1510,9 @@ namespace Codegen{
                     auto& operandNode = *exprNode.children[0];
                     auto operand = genExpr(operandNode, irb);
                     switch(exprNode.op){
-                        //can be TILDE, MINUS, AMPERSAND, LOGICAL_NOT
+                        // can be TILDE, MINUS, AMPERSAND, LOGICAL_NOT
                         case Token::Type::TILDE:
-                            return irb.CreateNot(operand); //i hope this is the right kind of not
+                            return irb.CreateNot(operand); // i hope this is the right kind of not
                             break;
                         case Token::Type::MINUS:
                             return irb.CreateNeg(operand);
@@ -1544,7 +1544,7 @@ namespace Codegen{
 
                         // all the following locial ops need to return i64s to conform to the C like behavior we want
 
-#define ICAST(irb, x) irb.CreateIntCast((x), i64, false) //unsigned cast because we want 0 for false and 1 for true (instead of -1)
+#define ICAST(irb, x) irb.CreateIntCast((x), i64, false) // unsigned cast because we want 0 for false and 1 for true (instead of -1)
 
                     // 2 edge cases: assignment, and short circuiting logical ops:
                     // short circuiting logical ops: conditional evaluation
@@ -1616,12 +1616,11 @@ namespace Codegen{
                             // this could be done with a trunc, but that is only allowed if the type is strictly smaller, the CreateIntCast distinguishes these cases and takes care of it for us
                             auto cast = irb.CreateIntCast(rhs, type, true);
 
-                            auto addrPtr = irb.CreateIntToPtr(addr, irb.getPtrTy()); //opaque ptrs galore!
+                            auto addrPtr = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
 
                             auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
                             irb.CreateStore(cast, getelementpointer);
                         }else if(/* lhs node has to be var if we're here */ lhsNode.op == Token::Type::KW_AUTO){
-                            //auto ptr = irb.CreateIntToPtr(varmapLookup(irb.GetInsertBlock(), lhsNode.name), irb.getPtrTy());
                             irb.CreateStore(rhs, varmapLookup(irb.GetInsertBlock(), lhsNode));
                         }else{/* in this case it has to be a register variable */
                             // in lhs: "old" varname of the var we're assigning to -> update mapping
@@ -1675,7 +1674,7 @@ namespace Codegen{
                                 // but because of the C like semantics, we need to zext them back to i64 afterwards
                                 auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
                                 auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-                                return ICAST(irb,irb.CreateLogicalAnd(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical and' instruction...
+                                return ICAST(irb,irb.CreateLogicalAnd(lhsi1,rhsi1)); // i have no idea how this works, cant find a 'logical and' instruction...
                             }
                         case Token::Type::LOGICAL_OR:
                             {
@@ -1683,7 +1682,7 @@ namespace Codegen{
                                 // but because of the C like semantics, we need to zext them back to i64 afterwards
                                 auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
                                 auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-                                return ICAST(irb,irb.CreateLogicalOr(lhsi1,rhsi1)); //i have no idea how this works, cant find a 'logical or' instruction...
+                                return ICAST(irb,irb.CreateLogicalOr(lhsi1,rhsi1)); // i have no idea how this works, cant find a 'logical or' instruction...
                             }
                             */
 #undef ICAST
@@ -1693,7 +1692,7 @@ namespace Codegen{
                 }
             case ASTNode::Type::NExprSubscript:
                 {
-                    //this can *ONLY* be a "load" (getelementpointer) subscript, store has been handled in the special case for assignments above
+                    // this can *ONLY* be a "load" (getelementpointer) subscript, store has been handled in the special case for assignments above
                     auto& addrNode = *exprNode.children[0];
                     auto& indexNode = *exprNode.children[1];
                     auto& sizespecNode = *exprNode.children[2];
@@ -1701,7 +1700,7 @@ namespace Codegen{
                     // if the addrNode is an auto var, we need to get the alloca instr from the varmap and use that as the addrPtr, otherwise need to evaluate the addr expr and cast it to a ptr
                     llvm::Value* addrPtr;
                     auto addr = genExpr(addrNode, irb); 
-                    addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); //opaque ptrs galore!
+                    addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
 
                     auto index = genExpr(indexNode, irb);
 
@@ -1710,7 +1709,7 @@ namespace Codegen{
 
                     auto load = irb.CreateLoad(type, getelementpointer);
 
-                    //we only have i64s, thus we need to convert our extracted value back to an i64
+                    // we only have i64s, thus we need to convert our extracted value back to an i64
                     // after reading up on IntCast vs SExt/Trunc (in the source code... Why can't they just document this stuff properly?), it seems that CreateIntCast is a wrapper around CreateSExt/CreateZExt, but in this case we know exactly what we need, so I think CreateSExt would be fine, except that is only allowed if the type is strictly larger, the CreateIntCast distinguishes these cases and takes care of it for us
                     //auto castResult = irb.CreateSExt(load, i64);
                     auto castResult = irb.CreateIntCast(load, i64, true);
@@ -1747,7 +1746,6 @@ namespace Codegen{
                         alloca->setName(stmtNode.children[0]->name);
                         irb.CreateStore(initializer, alloca);
 
-                        //auto allocaInt = irb.CreatePtrToInt(alloca, i64);
                         updateVarmap(irb, *stmtNode.children[0], alloca); // we actually want to save the ptr (cast to an int, because everything is an int, i hope there arent any provenance problems here) to the alloca'd memory, not the initializer
                     }else if(stmtNode.op == Token::Type::KW_REGISTER){
                         updateVarmap(irb, *stmtNode.children[0], initializer);
@@ -1869,7 +1867,7 @@ namespace Codegen{
                 genExpr(stmtNode, irb); 
                 break;
 
-                //hopefully impossible
+            // hopefully impossible
             default:
                 throw std::runtime_error("Something has gone seriously wrong here" STRINGIZE_MACRO(__LINE__));
         }

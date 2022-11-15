@@ -39,6 +39,14 @@ using std::unique_ptr;
 #define THROW_TODO\
     throw std::runtime_error("TODO(Line " STRINGIZE_MACRO(__LINE__) "): Not implemented yet")
 
+/*
+Analysis answers:
+
+Could use the mapping of register/auto to the individual uses of the variables from semantic analysis, as well finding implicit function declarations there
+
+
+ */
+
 struct Token{
 public:
     enum class Type{
@@ -1033,6 +1041,9 @@ namespace SemanticAnalysis{
             std::vector<string> sameScopeDecls{};
             for(auto& stmt : node.children){
                 if(stmt->type == ASTNode::Type::NStmtDecl){
+                    // right side needs to be evaluated first (with current decls!), then left side can be annotated
+                    analyzeNode(*stmt->children[1],decls);
+
                     //forbid same scope shadowing
                     if(std::find(sameScopeDecls.begin(), sameScopeDecls.end(), stmt->children[0]->name) != sameScopeDecls.end()){
                         SEMANTIC_ERROR("Variable \"" << stmt->children[0]->name << "\" was declared twice in the same scope");
@@ -1044,12 +1055,14 @@ namespace SemanticAnalysis{
                     });
                     sameScopeDecls.emplace_back(stmt->children[0]->name);
                     decls.emplace_back(stmt->children[0]->name, stmt->op == Token::Type::KW_REGISTER);
-                }
 
-                try{
-                    analyzeNode(*stmt,decls);
-                }catch(std::runtime_error& e){
-                    SEMANTIC_ERROR(e.what());
+                    analyzeNode(*stmt->children[0],decls);
+                }else{
+                    try{
+                        analyzeNode(*stmt,decls);
+                    }catch(std::runtime_error& e){
+                        SEMANTIC_ERROR(e.what());
+                    }
                 }
             }
         }else if(node.type == ASTNode::Type::NExprCall){
@@ -1291,6 +1304,18 @@ string url_encode(const string &value) {
 // - other minor changes in the parser
 // ------------------------------------------------------------------------------------------------------
 
+
+
+// from https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0919r3.html to allow heterogeneous lookups
+// TODO doesn't work for some reason, using temporary string object for now
+//struct string_hash {
+//    using transparent_key_equal = std::equal_to<>;  // Pred to use
+//    using hash_type = std::hash<std::string_view>;  // just a helper local type
+//    size_t operator()(std::string_view txt) const   { return hash_type{}(txt); }
+//    size_t operator()(const std::string& txt) const { return hash_type{}(txt); }
+//    size_t operator()(const char* txt) const        { return hash_type{}(txt); }
+//};
+
 namespace Codegen{
     llvm::LLVMContext ctx;
     auto moduleUP = std::make_unique<llvm::Module>("mod", ctx);
@@ -1299,10 +1324,12 @@ namespace Codegen{
 
     struct BasicBlockInfo{
         bool sealed{false};
-        std::unordered_map<string, llvm::Value*> varmap{};
+        std::unordered_map<string, llvm::Value*/*, string_hash, string_hash::transparent_key_equal*/> varmap{};
     };
 
     std::unordered_map<llvm::BasicBlock*, BasicBlockInfo> blockInfo;
+    std::unordered_map<llvm::PHINode*, ASTNode*> phisToResolve;
+
 
     llvm::Function* findFunction(string name){
         auto fnIt = llvm::find_if(moduleUP->functions(), [&name](auto& func){return func.getName() == name;});
@@ -1313,12 +1340,34 @@ namespace Codegen{
         }
     }
 
+    llvm::Value*& varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept;
+
+    llvm::Value* wrapVarmapLookupForUse(llvm::IRBuilder<>& irb, ASTNode& node){
+        if(node.op == Token::Type::KW_REGISTER){
+            // this should be what we want for register vars, for auto vars we aditionally need to look up the alloca (and store it back if its an assignment, see the assignment below)
+            return varmapLookup(irb.GetInsertBlock(), node); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer isn't the value anymore, nothing is changed about what it's pointing to.
+        }else {
+            return irb.CreateLoad(i64, varmapLookup(irb.GetInsertBlock(), node), node.name);
+        }
+    }
+
+    // for different block for lookup/insert
+    llvm::Value* wrapVarmapLookupForUse(llvm::BasicBlock* block, llvm::IRBuilder<>& irb, ASTNode& node){
+        if(node.op == Token::Type::KW_REGISTER){
+            // this should be what we want for register vars, for auto vars we aditionally need to look up the alloca (and store it back if its an assignment, see the assignment below)
+            return varmapLookup(block, node); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer isn't the value anymore, nothing is changed about what it's pointing to.
+        }else {
+            return irb.CreateLoad(i64, varmapLookup(block, node), node.name);
+        }
+    }
+
     // TODO: can the fact that this is cached in the "earlier" varmaps lead to cache invalidation problems (someone please quote Phil Karlton)?
     //       because of this potential problem, caching has been disabled for now, TODO enable it again after this has been thought through
     //       I'm now pretty certain that this is not a problem and we do in fact want to only update the current varmap and not the parent ones,
     //       so no cache invalidation problems
     // automatically creates phi nodes on demand
-    llvm::Value*& varmapLookup(llvm::BasicBlock* block, string& name) noexcept {
+    llvm::Value*& varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
+        string& name = node.name;
         auto& [sealed, varmap] = blockInfo[block];
         if(varmap.contains(name)){
             return varmap[name];
@@ -1326,7 +1375,7 @@ namespace Codegen{
             if(sealed){
                 // cache it, so we don't have to look it up every time
                 if(block->hasNPredecessors(1)){
-                    return varmap[name] = varmapLookup(block->getSinglePredecessor(), name);
+                    return varmap[name] = varmapLookup(block->getSinglePredecessor(), node);
                 }else if(block->hasNPredecessors(0)){
                     // returning poison is quite reasonable, as anything here should never be used, or looked up (entry block case)
                     return varmap[name] = llvm::PoisonValue::get(i64);
@@ -1342,7 +1391,8 @@ namespace Codegen{
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
                     for(auto pred:llvm::predecessors(block)){
-                        phi->addIncoming(varmapLookup(pred, name), pred);
+                        irb.SetInsertPoint(pred->getTerminator()); // insert possible load instruction just before the terminator of the predecessor
+                        phi->addIncoming(wrapVarmapLookupForUse(irb, node), pred);
                     }
                     return varmap[name] = phi;
                 }
@@ -1357,6 +1407,7 @@ namespace Codegen{
                     irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                 }
                 llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); //num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+                phisToResolve[phi] = &node;
 
                 // .setIncomingBlock() is very unreliable, because it does not care about the space that is actually available. So rather than:
                 //unsigned i = 0;
@@ -1373,27 +1424,24 @@ namespace Codegen{
         }
     }
 
-    llvm::Value*& varmapLookup(llvm::BasicBlock* block, llvm::StringRef name) noexcept{
-        string stringName{name.str()}; // TODO is it okay that the lifetime of this is just this function? Should be, right? Because the map saves the key independently anyway and for the time of the lookup, the string is still alive
-        return varmapLookup(block, stringName); // for whatever reason, using name.str() directly resuts in it calling itself...
-    }
-
     //just for convenience
-    inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, string& name, llvm::Value* val) noexcept{
+    inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
         auto& [sealed, varmap] = blockInfo[block];
-        return varmap[name] = val;
+        return varmap[node.name] = val;
     }
 
-    inline llvm::Value*& updateVarmap(llvm::IRBuilder<>& irb, string& name, llvm::Value* val) noexcept{
-        return updateVarmap(irb.GetInsertBlock(), name, val);
+    inline llvm::Value*& updateVarmap(llvm::IRBuilder<>& irb, ASTNode& node, llvm::Value* val) noexcept{
+        return updateVarmap(irb.GetInsertBlock(), node, val);
     }
 
     // fills phi nodes with correct values, assumes block is sealed
     inline void fillPHIs(llvm::BasicBlock* block) noexcept{
+        llvm::IRBuilder<> irb(block);
         for(auto& phi: block->phis()){
             unsigned i = 0;
             for(auto predIt = llvm::pred_begin(block); predIt!= llvm::pred_end(block); ++predIt, ++i){
-                phi.setIncomingValue(i, varmapLookup(*predIt, phi.getName()));
+                irb.SetInsertPoint((*predIt)->getTerminator()); //insert possible load instruction just before the terminator of the predecessor
+                phi.setIncomingValue(i, wrapVarmapLookupForUse(irb, *(phisToResolve[&phi])));
             }
         }
     }
@@ -1426,15 +1474,7 @@ namespace Codegen{
     llvm::Value* genExpr(ASTNode& exprNode, llvm::IRBuilder<>& irb){
         switch(exprNode.type){
             case ASTNode::Type::NExprVar:
-                if(exprNode.op == Token::Type::KW_REGISTER){
-                    // this should be what we want for register vars, for auto vars we aditionally need to look up the alloca (and store it back if its an assignment, see the assignment below)
-                    return varmapLookup(irb.GetInsertBlock(), exprNode.name); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer isn't the value anymore, nothing is changed about what it's pointing to.
-                }else if(exprNode.op == Token::Type::KW_AUTO){
-                    auto ptr = irb.CreateIntToPtr(varmapLookup(irb.GetInsertBlock(), exprNode.name), irb.getPtrTy());
-                    return irb.CreateLoad(i64, ptr, exprNode.name);
-                }else{
-                    throw std::runtime_error("Something has gone seriously wrong here, got a variable node wich is neither register nor auto, its is " + exprNode.toString());
-                }
+                return wrapVarmapLookupForUse(irb, exprNode);
 
             case ASTNode::Type::NExprNum:
                 return llvm::ConstantInt::get(i64, exprNode.value);
@@ -1488,7 +1528,9 @@ namespace Codegen{
                         case Token::Type::AMPERSAND:
                             {
                                 // get the ptr to the alloca then cast that to an int, because everything is an i64
-                                auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode.name);
+                                // TODO again think about if this makes sense 
+                                //      or should we use wrapVarmapLookupForUse here? I don't think so...
+                                auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode);
                                 return irb.CreatePtrToInt(ptr, i64);
                             }
                         default:
@@ -1579,10 +1621,14 @@ namespace Codegen{
                             auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
                             irb.CreateStore(cast, getelementpointer);
                         }else if(/* lhs node has to be var if we're here */ lhsNode.op == Token::Type::KW_AUTO){
-                            auto ptr = irb.CreateIntToPtr(varmapLookup(irb.GetInsertBlock(), lhsNode.name), irb.getPtrTy());
-                            irb.CreateStore(rhs, ptr);
+                            //auto ptr = irb.CreateIntToPtr(varmapLookup(irb.GetInsertBlock(), lhsNode.name), irb.getPtrTy());
+                            irb.CreateStore(rhs, varmapLookup(irb.GetInsertBlock(), lhsNode));
+                        }else{/* in this case it has to be a register variable */
+                            // in lhs: "old" varname of the var we're assigning to -> update mapping
+                            // in rhs: value to assign to it
+                            updateVarmap(irb, lhsNode, rhs);
                         }
-                        return rhs; // just as before, return the result, not the store
+                        return rhs; // just as before, return the result, not the store/assign/etc.
                     }
                     auto lhs = genExpr(lhsNode, irb);
 
@@ -1641,12 +1687,6 @@ namespace Codegen{
                             }
                             */
 #undef ICAST
-                        case Token::Type::ASSIGN: // also see the special assignment handling above
-                            // in lhs: "old" varname of the var we're assigning to -> update mapping
-                            // in rhs: value to assign to it
-                            updateVarmap(irb, lhsNode.name, rhs);
-                            return rhs;
-
                         default:
                             throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as binary operator");
                     }
@@ -1682,14 +1722,18 @@ namespace Codegen{
         }
     }
 
-    void genStmts(std::vector<unique_ptr<ASTNode>>& stmts, llvm::IRBuilder<>& irb);
+    void genStmts(std::vector<unique_ptr<ASTNode>>& stmts, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls);
 
     // I think this doesn't need a return type
-    void genStmt(ASTNode& stmtNode, llvm::IRBuilder<>& irb){
+    void genStmt(ASTNode& stmtNode, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls){
         switch(stmtNode.type){
             case ASTNode::Type::NStmtDecl:
                 {
                     auto initializer = genExpr(*stmtNode.children[1], irb);
+
+                    // so we can remove them on leaving the scope
+                    // TODO this needs to be done seperately for parameters
+                    scopeDecls.emplace(stmtNode.children[0]->name);
                     // i hope setting names doesn't hurt performance, but it wouldn't make sense if it did
                     if(stmtNode.op == Token::Type::KW_AUTO){
                         auto entryBB = &currentFunction->getEntryBlock();
@@ -1703,10 +1747,10 @@ namespace Codegen{
                         alloca->setName(stmtNode.children[0]->name);
                         irb.CreateStore(initializer, alloca);
 
-                        auto allocaInt = irb.CreatePtrToInt(alloca, i64);
-                        updateVarmap(irb, stmtNode.children[0]->name, allocaInt); // we actually want to save the ptr (cast to an int, because everything is an int, i hope there arent any provenance problems here) to the alloca'd memory, not the initializer
+                        //auto allocaInt = irb.CreatePtrToInt(alloca, i64);
+                        updateVarmap(irb, *stmtNode.children[0], alloca); // we actually want to save the ptr (cast to an int, because everything is an int, i hope there arent any provenance problems here) to the alloca'd memory, not the initializer
                     }else if(stmtNode.op == Token::Type::KW_REGISTER){
-                        updateVarmap(irb, stmtNode.children[0]->name, initializer);
+                        updateVarmap(irb, *stmtNode.children[0], initializer);
                     }else{
                         throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(stmtNode.op) + " as decl type");
                     }
@@ -1718,16 +1762,45 @@ namespace Codegen{
             case ASTNode::Type::NStmtBlock:
                 // TODO how do we handle new scopes? Can't just make a basic block for it, right?
                 //  possible answer: I think we don't really. I think its fine to simply parse it as it is, and keep it in the same BasicBlock, var declarations get overriden anyway and are already checked to be semantically valid
-                //  actual answer: actually we do... Yes, the're overriden correctly, but the varmap needs to be updated for shadowed variables as soon as we leave the scope
+                //  actual answer: actually we do... Yes, the're overriden correctly, but the varmap needs to be updated for shadowed variables as soon as we leave the scope.
+                //  And the bigger Problem is: We might not be in the same BB as when we entered the scope
+                //  what might work: we could save the varmap before entering the scope, and restore it when leaving the scope, but that is probably quite slow
+                //  that does not entirely work: For register variables updated inside the scope, the updated varmap is in fact correct, so restoring it is wrong
                 //  so: TODO!
-                genStmts(stmtNode.children, irb);
+                {
+                    // before entering a scope, clear the decls
+                    // safe because the strings (variable names) are constant -> can't invalidate set invariants/hashes
+                    std::unordered_set<std::string_view> scopeDecls{};
+
+                    auto varmapCopy = blockInfo[irb.GetInsertBlock()].varmap;
+                    genStmts(stmtNode.children, irb, scopeDecls);
+                    // leaving the scope == leaving the block, so for every scope we leave, we can handle it here
+                    // new idea: keep track of all declarations made in the current scope, and upon leaving:
+                    // 1. if they are not present in the varmapCopy: remove them from the varmap
+                    // 2. if they are present there: copy them from the varmapCopy
+                    // this is also not the fastest, but it should work
+
+                    auto& [_, varmap] = blockInfo[irb.GetInsertBlock()];
+
+                    for(std::string_view decl: scopeDecls){
+                        // TODO as soon as the heterogeneous lookup works, replace this
+                        string declStr{decl};
+                        if(varmapCopy.contains(declStr)){
+                            varmap[declStr] = varmapCopy[declStr];
+                        }else{
+                            varmap.erase(declStr);
+                        }
+                    }
+
+                    // after leaving the scope, the decls are thrown away
+                }
                 break;
             case ASTNode::Type::NStmtIf:
                 {
                     bool hasElse = stmtNode.children.size() == 3;
 
-                    llvm::BasicBlock* then =         llvm::BasicBlock::Create(ctx, "then", currentFunction);
-                    llvm::BasicBlock* els  = hasElse?llvm::BasicBlock::Create(ctx, "else", currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
+                    llvm::BasicBlock* then =         llvm::BasicBlock::Create(ctx, "then",   currentFunction);
+                    llvm::BasicBlock* els  = hasElse?llvm::BasicBlock::Create(ctx, "else",   currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
                     llvm::BasicBlock* cont =         llvm::BasicBlock::Create(ctx, "ifCont", currentFunction);
                     if(!hasElse){
                         els = cont;
@@ -1742,23 +1815,27 @@ namespace Codegen{
                     thenSealed = true;
                     // var map is queried recursively anyway, would be a waste to copy it here
 
-                    llvm::IRBuilder<> thenIRB(then);
-                    genStmt(*stmtNode.children[1], thenIRB);
-                    bool thenBranchesToCont = !(thenIRB.GetInsertBlock()->getTerminator());
+                    irb.SetInsertPoint(then);
+                    std::unordered_set<std::string_view> empty{};
+                    genStmt(*stmtNode.children[1], irb, empty);
+                    auto thenBlock = irb.GetInsertBlock();
+
+                    bool thenBranchesToCont = !(thenBlock->getTerminator());
                     if(thenBranchesToCont){
-                        thenIRB.CreateBr(cont);
+                        irb.CreateBr(cont);
                     }
                     // now if is generated -> we can seal else
 
                     auto& [elseSealed, elseVarmap] = blockInfo[els];
                     elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
                     if(hasElse){
-                        llvm::IRBuilder<> elseIRB(els);
-                        genStmt(*stmtNode.children[2], elseIRB);
+                        irb.SetInsertPoint(els);
+                        genStmt(*stmtNode.children[2], irb, empty);
+                        auto elseBlock = irb.GetInsertBlock();
 
-                        bool elseBranchesToCont = !(elseIRB.GetInsertBlock()->getTerminator());
+                        bool elseBranchesToCont = !(elseBlock->getTerminator());
                         if(elseBranchesToCont){
-                            elseIRB.CreateBr(cont);
+                            irb.CreateBr(cont);
                         }
                     }
 
@@ -1766,7 +1843,7 @@ namespace Codegen{
                     sealBlock(cont);
 
                     // then/else cannot generate phi nodes, because they were sealed from the start and have a single predecessor
-                    // TODO in light of the parent management debacel, think about this statement *real hard* again
+                    // TODO in light of the parent management debacel, think about this statement *real hard* again, so this is in here for now
                     fillPHIs(then);
                     fillPHIs(els);
 
@@ -1798,9 +1875,9 @@ namespace Codegen{
         }
     }
 
-    void genStmts(std::vector<unique_ptr<ASTNode>>& stmts, llvm::IRBuilder<>& irb){
+    void genStmts(std::vector<unique_ptr<ASTNode>>& stmts, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls){
         for(auto& stmt : stmts){
-            genStmt(*stmt, irb);
+            genStmt(*stmt, irb, scopeDecls);
             if(stmt->type == ASTNode::Type::NStmtReturn){
                 // stop the generation for this block
                 break;
@@ -1822,11 +1899,12 @@ namespace Codegen{
             llvm::Argument* arg = fn->getArg(i);
             auto& name = fnNode.children[0]->children[i]->name;
             arg->setName(name);
-            updateVarmap(irb, name, arg);
+            updateVarmap(irb, *fnNode.children[0]->children[i], arg);
         }
 
         auto& blockNode = *fnNode.children[1];
-        genStmts(blockNode.children, irb);
+        std::unordered_set<std::string_view> empty; // its fine to leave it uninitialized, because this child is always a block -> generates a new and actually useful scope decls anyway
+        genStmt(blockNode, irb, empty); // calls gen stmts on the blocks children, but does additional stuff
 
         auto insertBlock = irb.GetInsertBlock();
         if(insertBlock->hasNUses(0) && insertBlock!=&currentFunction->getEntryBlock()){

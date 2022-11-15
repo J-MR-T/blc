@@ -1397,12 +1397,13 @@ namespace Codegen{
                         irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                     }
                     llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+                    varmap[name] = phi; // doing this here breaks a potential cycle in the following lookup, if we look up this same name and it points back here, we don't create another phi node, we use the existing one we just created
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
                     for(auto pred:llvm::predecessors(block)){
                         phi->addIncoming(varmapLookup(pred, node), pred);
                     }
-                    return varmap[name] = phi;
+                    return phi;
                 }
             }else{
                 // we need a phi node in this case

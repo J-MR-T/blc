@@ -1327,8 +1327,8 @@ namespace Codegen{
         std::unordered_map<string, llvm::Value*/*, string_hash, string_hash::transparent_key_equal*/> varmap{};
     };
 
-    std::unordered_map<llvm::BasicBlock*, BasicBlockInfo> blockInfo;
-    std::unordered_map<llvm::PHINode*, ASTNode*> phisToResolve;
+    std::unordered_map<llvm::BasicBlock*, BasicBlockInfo> blockInfo{};
+    std::unordered_map<llvm::PHINode*, ASTNode*> phisToResolve{};
 
 
     llvm::Function* findFunction(string name){
@@ -1340,7 +1340,7 @@ namespace Codegen{
         }
     }
 
-    llvm::Value*& varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept;
+    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept;
 
     llvm::Value* wrapVarmapLookupForUse(llvm::IRBuilder<>& irb, ASTNode& node){
         if(node.op == Token::Type::KW_REGISTER){
@@ -1366,19 +1366,20 @@ namespace Codegen{
     //       I'm now pretty certain that this is not a problem and we do in fact want to only update the current varmap and not the parent ones,
     //       so no cache invalidation problems
     // automatically creates phi nodes on demand
-    llvm::Value*& varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
+    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
         string& name = node.name;
         auto& [sealed, varmap] = blockInfo[block];
+        auto valueType = (node.op == Token::Type::KW_REGISTER?i64:llvm::PointerType::get(ctx, 0));
         if(varmap.contains(name)){
             return varmap[name];
-        }else{
+        }else{ // for register variable we need phi nodes and the like
             if(sealed){
                 // cache it, so we don't have to look it up every time
                 if(block->hasNPredecessors(1)){
                     return varmap[name] = varmapLookup(block->getSinglePredecessor(), node);
                 }else if(block->hasNPredecessors(0)){
                     // returning poison is quite reasonable, as anything here should never be used, or looked up (entry block case)
-                    return varmap[name] = llvm::PoisonValue::get(i64);
+                    return varmap[name] = llvm::PoisonValue::get(valueType);
                 }else{ // > 1 predecessors
                     // create phi node to merge it
                     llvm::IRBuilder<> irb(block);
@@ -1387,26 +1388,23 @@ namespace Codegen{
                     if(nonphi!=nullptr){
                         irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                     }
-                    llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+                    llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
                     for(auto pred:llvm::predecessors(block)){
-                        irb.SetInsertPoint(pred->getTerminator()); // insert possible load instruction just before the terminator of the predecessor
-                        phi->addIncoming(wrapVarmapLookupForUse(irb, node), pred);
+                        phi->addIncoming(varmapLookup(pred, node), pred);
                     }
                     return varmap[name] = phi;
                 }
             }else{
                 // we need a phi node in this case
-                // TODO maybe use another value for num reserved values here, if possible
-                // can there be multiple IRBs? like this?:
                 llvm::IRBuilder<> irb(block);
                 auto nonphi = block->getFirstNonPHI();
-                // if there is no nonphi node, we can just insert at the end, which should be where the irb starts
+                // if there is no nonphi node, we can just insert at the end of the block, which should be where the irb starts
                 if(nonphi!=nullptr){
                     irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                 }
-                llvm::PHINode* phi = irb.CreatePHI(i64, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+                llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
                 phisToResolve[phi] = &node;
 
                 // .setIncomingBlock() is very unreliable, because it does not care about the space that is actually available. So rather than:
@@ -1416,7 +1414,7 @@ namespace Codegen{
                 //}
                 // we do this:
                 for(auto pred: llvm::predecessors(block)){
-                    phi->addIncoming(llvm::UndefValue::get(i64), pred);
+                    phi->addIncoming(llvm::UndefValue::get(valueType), pred);
                 }
                 // it's not as clean, but it does guarantee, that there is enough space etc.
                 return varmap[name] = phi;
@@ -1440,8 +1438,7 @@ namespace Codegen{
         for(auto& phi: block->phis()){
             unsigned i = 0;
             for(auto predIt = llvm::pred_begin(block); predIt!= llvm::pred_end(block); ++predIt, ++i){
-                irb.SetInsertPoint((*predIt)->getTerminator()); // insert possible load instruction just before the terminator of the predecessor
-                phi.setIncomingValue(i, wrapVarmapLookupForUse(irb, *(phisToResolve[&phi])));
+                phi.setIncomingValue(i, varmapLookup(*predIt, *(phisToResolve[&phi])));
             }
         }
     }
@@ -1498,6 +1495,7 @@ namespace Codegen{
                             return irb.CreateCall(&*callee, args);
                         }else{
                             // otherwise, there is something weird going on
+                            DEBUGLOG("Call to function " << exprNode.name << " with " << args.size() << " arguments, but function has " << callee->arg_size() << " parameters");
                             return llvm::PoisonValue::get(i64);
                         }
                     }else{
@@ -1584,7 +1582,7 @@ namespace Codegen{
                         irb.SetInsertPoint(evRHS);
                         auto rhs = genExpr(rhsNode, irb);
                         auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0));
-                        auto compResult = isAnd?irb.CreateLogicalAnd(lhsi1, rhsi1):irb.CreateLogicalOr(lhsi1, rhsi1);
+                        auto& compResult = rhsi1;
                         irb.CreateBr(cont);
 
                         auto& [contSealed, contVarmap] = blockInfo[cont];
@@ -1768,6 +1766,7 @@ namespace Codegen{
                 {
                     // before entering a scope, clear the decls
                     // safe because the strings (variable names) are constant -> can't invalidate set invariants/hashes
+                    // I know this is quite slow and in retrospect I would have designed my datastructure differently to retain information about scopes during the semantic analysis, but thats not really easily possible anymore at this stage
                     std::unordered_set<std::string_view> scopeDecls{};
 
                     auto varmapCopy = blockInfo[irb.GetInsertBlock()].varmap;

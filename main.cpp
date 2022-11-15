@@ -1374,8 +1374,7 @@ namespace Codegen{
     //       I'm now pretty certain that this is not a problem and we do in fact want to only update the current varmap and not the parent ones,
     //       so no cache invalidation problems
     // automatically creates phi nodes on demand
-    llvm::Value* varmapLookupInner(llvm::BasicBlock* block, ASTNode& node, std::unordered_set<llvm::BasicBlock*>& queried) noexcept {
-        queried.insert(block);
+    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
         string& name = node.name;
         auto& [sealed, varmap] = blockInfo[block];
         auto valueType = (node.op == Token::Type::KW_REGISTER?i64:llvm::PointerType::get(ctx, 0));
@@ -1385,7 +1384,7 @@ namespace Codegen{
             if(sealed){
                 // cache it, so we don't have to look it up every time
                 if(block->hasNPredecessors(1)){
-                    return varmap[name] = varmapLookupInner(block->getSinglePredecessor(), node, queried);
+                    return varmap[name] = varmapLookup(block->getSinglePredecessor(), node);
                 }else if(block->hasNPredecessors(0)){
                     // returning poison is quite reasonable, as anything here should never be used, or looked up (entry block case)
                     return varmap[name] = llvm::PoisonValue::get(valueType);
@@ -1401,9 +1400,7 @@ namespace Codegen{
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
                     for(auto pred:llvm::predecessors(block)){
-                        if(!queried.contains(pred)){
-                            phi->addIncoming(varmapLookupInner(pred, node, queried), pred);
-                        }
+                        phi->addIncoming(varmapLookup(pred, node), pred);
                     }
                     return varmap[name] = phi;
                 }
@@ -1424,13 +1421,6 @@ namespace Codegen{
         }
     }
 
-    // wrapper for varmapLookupInner, saves already looked up blocks
-    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
-        std::unordered_set<llvm::BasicBlock*> queried{};
-        return varmapLookupInner(block, node, queried);
-    }
-
-
     // just for convenience
     inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
         auto& [sealed, varmap] = blockInfo[block];
@@ -1446,8 +1436,6 @@ namespace Codegen{
         //llvm::IRBuilder<> irb(block);
         for(auto& phi: block->phis()){
             for(auto pred: llvm::predecessors(block)){
-                // only avoids direct recursion, meaning cycle length 2. But bigger cycle lengths should not occur in this language, as there is  only a while, and that cannot loop in the condition, only the body and there it does not query the body itself
-                // TODO maybe replace this with a `visited` hashmap
                 phi.addIncoming(varmapLookup(pred, *(phisToResolve[&phi])), pred);
             }
         }

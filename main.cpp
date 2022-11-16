@@ -1123,6 +1123,22 @@ namespace SemanticAnalysis{
             for(auto& child : node.children){
                 analyzeNode(*child, decls);
             }
+        }else if(node.type == ASTNode::Type::NStmtIf){
+            // forbid declarations as sole stmt of if/else
+            if(node.children[1]->type == ASTNode::Type::NStmtDecl || (node.children.size() > 2 && node.children[2]->type == ASTNode::Type::NStmtDecl)){
+                SEMANTIC_ERROR("Declarations are not allowed as the sole statement in if/else");
+            }
+            for(auto& child : node.children){
+                analyzeNode(*child, decls);
+            }
+        }else if(node.type == ASTNode::Type::NStmtWhile){
+            // forbid declarations as sole stmt of while
+            if(node.children[1]->type == ASTNode::Type::NStmtDecl){
+                SEMANTIC_ERROR("Declarations are not allowed as the sole statement in while");
+            }
+            for(auto& child : node.children){
+                analyzeNode(*child, decls);
+            }
         }else{
             for(auto& child : node.children){
                 analyzeNode(*child, decls);
@@ -1848,7 +1864,6 @@ namespace Codegen{
                 }
                 break;
             case ASTNode::Type::NStmtWhile:
-                //THROW_TODO; // TODO
                 {
                     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(ctx, "whileCond", currentFunction);
                     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(ctx, "whileBody", currentFunction);

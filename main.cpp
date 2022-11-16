@@ -42,11 +42,26 @@ using std::unique_ptr;
 /*
 Analysis answers:
 
-Could use the mapping of register/auto to the individual uses of the variables from semantic analysis, as well finding implicit function declarations there
+# Testing
+The codegenerator has been extensively tested, both for valid code, as well as correct semantics. Feel free to run the "test.sh" script and inspect the files it checks.
+(obviously all tests pass for me, I hope there is no non-portable nonsense going on...)
 
-Obvious optimizations:
-samples/llvmAuto.b shows that llc (on both -O0 and the default optimization level, although that is better than -O0) still uses the stack for the auto variables, even though there are enough registers available and their addresses are never needed.
-This could be optimized so every auto variable is stored in a register.
+# Reusing information/Scope handling
+First of all: Scope handling in this implementation is not great to say the least. I'm quite ashamed of how I did it in the end, its quite cumbersome, slow, and not programmatically nice.
+This is a result of not having considered scopes when originally designing the AST, I thought something along the lines of "I only need scopes in the semantic analysis,
+and I can do it on the fly there, no need to save them". Which is of course nonsense in retrospect, but I simply didn't consider the codegeneration phase back then,
+my inner german would say: "Again what learned" ;)
+But rewriting the whole datastructure architecture, semantic analysis, and the parts of the code generation that were already done at that point was just too much for me,
+I had already spent 3 whole days on the code generation alone, when the fact I need one map per scope really hit me.
+
+So, after this laborious, boring and somewhat petty disclaimer here's the actual answer: had I considered the importance of scopes (and variable shadowing in particular) in the beginning (of writing the parser),
+I could have reused a lot of information from the semantic analysis, and stored a pointer to a scope (and managing those somewhere else) in each variable, making lookup much easier, without having to on the fly construct and dismantle scopes. But in this implementation I could only use the information about calls (-> implicit function declarations) and variable type (reg/auto) from the semantic analysis.
+
+# Obvious optimizations
+Piping the output of the compilation of samples/llvmAuto.b to llc shows that llc still uses the stack for parts of the auto variables, even though there are still registers available and their addresses are never needed. But llc does optimize the very heavy stack use, in the original IR to much lighter stack use, this can be seen when compiling with -O0 added to llc's args.
+This could be optimized even further, in order to store every auto variable in a register if possible.
+
+Because of the semantics of our language, we have to be able to handle ints on the left side of a subscript, as well as store the result of address-of in an int. This results in a lot of unnecessary casts, which could be, and are, optimized away.
 
  */
 

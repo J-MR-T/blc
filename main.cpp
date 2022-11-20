@@ -39,6 +39,9 @@ using std::unique_ptr;
 #define THROW_TODO\
     throw std::runtime_error("TODO(Line " STRINGIZE_MACRO(__LINE__) "): Not implemented yet")
 
+
+// search for "HW 4" to find the start of the new code
+
 /*
 Analysis answers:
 
@@ -52,7 +55,7 @@ This is a result of not having considered scopes when originally designing the A
 and I can do it on the fly there, no need to save them". Which is of course nonsense in retrospect, but I simply didn't consider the codegeneration phase back then,
 my inner german would say: "Again what learned" ;)
 But rewriting the whole datastructure architecture, semantic analysis, and the parts of the code generation that were already done at that point was just too much for me,
-I had already spent 3 whole days on the code generation alone, when the fact I need one map per scope really hit me.
+I had already spent 3 whole days on the code generation alone, when the fact I need one map per scope even for the codegeneration really hit me, and I wasn't nearly done.
 
 So, after this laborious, boring and somewhat petty disclaimer here's the actual answer: had I considered the importance of scopes (and variable shadowing in particular) in the beginning (of writing the parser),
 I could have reused a lot of information from the semantic analysis, and stored a pointer to a scope (and managing those somewhere else) in each variable, making lookup much easier, without having to on the fly construct and dismantle scopes. But in this implementation I could only use the information about calls (-> implicit function declarations) and variable type (reg/auto) from the semantic analysis.
@@ -63,7 +66,7 @@ This could be optimized even further, in order to store every auto variable in a
 
 Because of the semantics of our language, we have to be able to handle ints on the left side of a subscript, as well as store the result of address-of in an int. This results in a lot of unnecessary casts, which could be, and are, optimized away.
 
- */
+*/
 
 struct Token{
 public:
@@ -1174,7 +1177,6 @@ namespace SemanticAnalysis{
 }
 
 namespace ArgParse{
-
     struct Arg{
         std::string shortOpt{""};
         std::string longOpt{""};
@@ -1189,8 +1191,10 @@ namespace ArgParse{
         }
     };
 
+    std::map<Arg, std::string> parsedArgs{};
+
     // possible arguments
-    const std::array<Arg,11> possible{{
+    const std::array<Arg,12> possible{{
         {"h", "help", 0, "Show this help message and exit",  false, true},
         {"i", "input", 1, "Input file",  true, false},
         {"d", "dot", 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)", false, true},
@@ -1202,6 +1206,7 @@ namespace ArgParse{
         {"b", "benchmark", 0, "Time execution time for parsing and semantic analysis and print memory footprint", false, true},
         {"",  "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)", false, false},
         {"l",  "llvm", 0, "Output LLVM IR (mutually exclusive with p/d/u), by default to stdout, except if an output file is specified using -o", false, true},
+        {"w",  "nowarn", 0, "Do not generate warnings during the LLVM codegeneration phase (has no effect unless -l is specified)", false, true},
     }};
 
     void printHelp(){
@@ -1235,7 +1240,7 @@ namespace ArgParse{
     }
 
     //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
-    std::map<Arg, std::string> parse(int argc, char *argv[]){
+    std::map<Arg, std::string>& parse(int argc, char *argv[]){
         std::stringstream ss;
         ss << " ";
         for (int i = 1; i < argc; ++i) {
@@ -1244,7 +1249,6 @@ namespace ArgParse{
 
         string argString = ss.str();
 
-        std::map<Arg, std::string> args;
 
         //handle positinoal args first, they have lower precedence
         //find them all, put them into a vector, then match them to the possible args
@@ -1272,7 +1276,7 @@ cont:
             if(arg.pos != 0){
                 //this is a positional arg
                 if(positionalArgs.size() > arg.pos-1){
-                    args[arg] = positionalArgs[arg.pos-1];
+                    parsedArgs[arg] = positionalArgs[arg.pos-1];
                 }
             }
         }
@@ -1286,10 +1290,10 @@ cont:
                 std::regex matchLong{" --"+arg.longOpt+"(\\s*|=)([^\\s=]+)"};
                 std::smatch match;
                 if(arg.shortOpt!="" && std::regex_search(argString, match, matchShort)){
-                    args[arg] = match[1];
+                    parsedArgs[arg] = match[1];
                 }else if(arg.longOpt!="" && std::regex_search(argString, match, matchLong)){
-                    args[arg] = match[2];
-                }else if(arg.required && !args.contains(arg)){
+                    parsedArgs[arg] = match[2];
+                }else if(arg.required && !parsedArgs.contains(arg)){
                     std::cerr << "Missing required argument: -" << arg.shortOpt << "/--" << arg.longOpt << std::endl;
                     missingRequired = true;
                 }
@@ -1297,7 +1301,7 @@ cont:
                 std::regex matchFlagShort{" -[a-zA-z]*"+arg.shortOpt};
                 std::regex matchFlagLong{" --"+arg.longOpt};
                 if(std::regex_search(argString, matchFlagShort) || std::regex_search(argString, matchFlagLong)){
-                    args[arg] = ""; // empty string for flags, will just be checked using .contains
+                    parsedArgs[arg] = ""; // empty string for flags, will just be checked using .contains
                 }
             };
         }
@@ -1306,7 +1310,7 @@ cont:
             printHelp();
             exit(EXIT_FAILURE);
         }
-        return args;
+        return parsedArgs;
     }
 
 }
@@ -1343,27 +1347,28 @@ string url_encode(const string &value) {
 // - other minor changes in the parser
 // ------------------------------------------------------------------------------------------------------
 
-
-
-// from https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0919r3.html to allow heterogeneous lookups
-// TODO doesn't work for some reason, using temporary string object for now
-//struct string_hash {
-//    using transparent_key_equal = std::equal_to<>;  // Pred to use
-//    using hash_type = std::hash<std::string_view>;  // just a helper local type
-//    size_t operator()(std::string_view txt) const   { return hash_type{}(txt); }
-//    size_t operator()(const std::string& txt) const { return hash_type{}(txt); }
-//    size_t operator()(const char* txt) const        { return hash_type{}(txt); }
-//};
-
 namespace Codegen{
+    bool warningsGenerated{false};
+
     llvm::LLVMContext ctx;
     auto moduleUP = std::make_unique<llvm::Module>("mod", ctx);
     llvm::Type* i64 = llvm::Type::getInt64Ty(ctx);
     llvm::Function* currentFunction = nullptr;
 
+    void warn(const std::string& msg, llvm::Instruction* instr = nullptr){
+        if(!ArgParse::parsedArgs.contains(ArgParse::possible[11])){
+            llvm::errs() << "Warning: " << msg;
+            if(instr != nullptr){
+                llvm::errs() << " at " << *instr;
+            }
+            llvm::errs() << "\n";
+            warningsGenerated = true;
+        }
+    }
+
     struct BasicBlockInfo{
         bool sealed{false};
-        std::unordered_map<string, llvm::Value*/*, string_hash, string_hash::transparent_key_equal*/> varmap{};
+        std::unordered_map<string, llvm::Value*/*, string_hash, string_hash::transparent_key_equal*/> varmap{}; // couldn't get transparent lookup to work (string_hash has since been deleted)
     };
 
     std::unordered_map<llvm::BasicBlock*, BasicBlockInfo> blockInfo{};
@@ -1400,10 +1405,6 @@ namespace Codegen{
         }
     }
 
-    // TODO: can the fact that this is cached in the "earlier" varmaps lead to cache invalidation problems (someone please quote Phil Karlton)?
-    //       because of this potential problem, caching has been disabled for now, TODO enable it again after this has been thought through
-    //       I'm now pretty certain that this is not a problem and we do in fact want to only update the current varmap and not the parent ones,
-    //       so no cache invalidation problems
     // automatically creates phi nodes on demand
     llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
         string& name = node.name;
@@ -1524,7 +1525,10 @@ namespace Codegen{
                             return irb.CreateCall(&*callee, args);
                         }else{
                             // otherwise, there is something weird going on
-                            DEBUGLOG("Call to function " << exprNode.name << " with " << args.size() << " arguments, but function has " << callee->arg_size() << " parameters");
+                            std::stringstream ss{};
+                            ss << "Call to function " << exprNode.name << " with " << args.size() << " arguments, but function has " << callee->arg_size() << " parameters";
+                            DEBUGLOG(ss.str());
+                            warn(ss.str());
                             return llvm::PoisonValue::get(i64);
                         }
                     }else{
@@ -1602,7 +1606,6 @@ namespace Codegen{
                         auto& [rhsSealed, rhsVarmap] = blockInfo[evRHS];
                         rhsSealed = true;
                         // don't need to fill phi's for RHS later, because it cant generate phis: is sealed, and has single parent
-                        // TODO in light of the parent management debacel, think about this statement *real hard* again
 
                         // var map is queried recursively anyway, would be a waste to copy it here
 
@@ -1619,15 +1622,13 @@ namespace Codegen{
                         auto rhsParentBlock = irb.GetInsertBlock();
                         phi->addIncoming(compResult, rhsParentBlock); // otherwise, if we didnt skip, we need to know what the rhs evaluated to
 
-                        // TODO this is definitely a problem too: adding these incoming branches manually does not work, because the predecessors might differ depending on the nested generation
-
                         irb.SetInsertPoint(cont);
 
                         return ICAST(irb, phi);
                     };
 
                     // assignment needs special handling:
-                    // TODO before this switch and CRUCIALLY (!!!) before the lhs gets evaluated, check if exprNode.op is an assign and if the left hand side is a subscript. in that case, we need to generate a store instruction for the assignment
+                    // before this switch and CRUCIALLY (!!!) before the lhs gets evaluated, check if exprNode.op is an assign and if the left hand side is a subscript. in that case, we need to generate a store instruction for the assignment
                     //  we also need to generate a store, if the lhs is an auto variable
                     auto rhs = genExpr(rhsNode, irb);
                     if(exprNode.op == Token::Type::ASSIGN){
@@ -1755,7 +1756,6 @@ namespace Codegen{
                     auto initializer = genExpr(*stmtNode.children[1], irb);
 
                     // so we can remove them on leaving the scope
-                    // TODO this needs to be done seperately for parameters
                     scopeDecls.emplace(stmtNode.children[0]->name);
                     // i hope setting names doesn't hurt performance, but it wouldn't make sense if it did
                     if(stmtNode.op == Token::Type::KW_AUTO){
@@ -1781,21 +1781,16 @@ namespace Codegen{
             case ASTNode::Type::NStmtReturn:
                 // technically returning "nothing" is undefined behavior, so we can just return 0 in that case
                 if(stmtNode.children.size() == 0){
-                    irb.CreateRet(irb.getInt64(0));
+                    //irb.CreateRet(irb.getInt64(0));
+                    // actually I think returning poison/undef is better, and warning about it
+                    auto retrn = irb.CreateRet(llvm::PoisonValue::get(i64));
+                    warn("Returning nothing is undefined behavior", retrn);
                 }else{
                     irb.CreateRet(genExpr(*stmtNode.children[0], irb));
                 }
                 break;
             case ASTNode::Type::NStmtBlock:
-                // TODO how do we handle new scopes? Can't just make a basic block for it, right?
-                //  possible answer: I think we don't really. I think its fine to simply parse it as it is, and keep it in the same BasicBlock, var declarations get overriden anyway and are already checked to be semantically valid
-                //  actual answer: actually we do... Yes, the're overriden correctly, but the varmap needs to be updated for shadowed variables as soon as we leave the scope.
-                //  And the bigger Problem is: We might not be in the same BB as when we entered the scope
-                //  what might work: we could save the varmap before entering the scope, and restore it when leaving the scope, but that is probably quite slow
-                //  that does not entirely work: For register variables updated inside the scope, the updated varmap is in fact correct, so restoring it is wrong
-                //  so: TODO!
                 {
-                    // before entering a scope, clear the decls
                     // safe because the strings (variable names) are constant -> can't invalidate set invariants/hashes
                     // I know this is quite slow and in retrospect I would have designed my datastructure differently to retain information about scopes during the semantic analysis, but thats not really easily possible anymore at this stage
                     std::unordered_set<std::string_view> scopeDecls{};
@@ -1811,7 +1806,7 @@ namespace Codegen{
                     auto& [_, varmap] = blockInfo[irb.GetInsertBlock()];
 
                     for(std::string_view decl: scopeDecls){
-                        // TODO as soon as the heterogeneous lookup works, replace this
+                        // I sadly couldn't get heterogeneous/transparent lookup for the varmap to work, so we have to do this, which makes it even slower :(
                         string declStr{decl};
                         if(varmapCopy.contains(declStr)){
                             varmap[declStr] = varmapCopy[declStr];
@@ -1870,9 +1865,8 @@ namespace Codegen{
                     blockInfo[contBB].sealed = true;
 
                     // then/else cannot generate phi nodes, because they were sealed from the start and have a single predecessor
-                    // TODO in light of the parent management debacel, think about this statement *real hard* again, so this is in here for now
-                    fillPHIs(thenBB);
-                    fillPHIs(elseBB);
+                    //fillPHIs(thenBB);
+                    //fillPHIs(elseBB);
 
                     // now that we've generated the if, we can 'preceed as before' in the parent call, so just set the irb to the right place
                     irb.SetInsertPoint(contBB); 
@@ -1910,8 +1904,7 @@ namespace Codegen{
                     sealBlock(condBB);
 
                     // body cannot generate phi nodes because its sealed from the start and has a single predecessor
-                    // TODO in light of the parent management debacel, think about this statement *real hard* again, so this is in here for now
-                    fillPHIs(bodyBB);
+                    //fillPHIs(bodyBB);
 
                     blockInfo[contBB].sealed = true;
 
@@ -1925,11 +1918,6 @@ namespace Codegen{
             case ASTNode::Type::NExprUnOp:
             case ASTNode::Type::NExprBinOp:
             case ASTNode::Type::NExprSubscript:
-                // this can lead to empty blocks. because assignments don't necessarily really generate instructions, if the only thing in the block is an assignment, it can be empty. We need to somehow forefully insert the instruction
-
-                // TODO i think its not a problem anymore that this can lead to empty blocks, so remove the hacky donothing intrinsic for now.
-                //  inserted here, so assignments actually fill blocks with stuff
-                //irb.CreateIntrinsic(llvm::Intrinsic::donothing, {}, {}); // TODO this looks very hacky currently, but inserting the generated expression doesn't work either
                 genExpr(stmtNode, irb); 
                 break;
 
@@ -2024,8 +2012,10 @@ namespace Codegen{
         if(moduleIsBroken){
             moduleUP->print(llvm::errs(), nullptr);
         }else{
-            // TODO change this to the correct output stream at the end
             moduleUP->print(out, nullptr);
+        }
+        if(warningsGenerated){
+            llvm::errs() << "Warnings were generated during code generation, please check the output for more information\n";
         }
         return !moduleIsBroken;
     }
@@ -2036,17 +2026,17 @@ namespace Codegen{
 int main(int argc, char *argv[])
 {
     try{
-        auto args = ArgParse::parse(argc, argv);
+        auto parsedArgs = ArgParse::parse(argc, argv);
 
-        if(args.contains(ArgParse::possible[0])){
+        if(parsedArgs.contains(ArgParse::possible[0])){
             ArgParse::printHelp();
             return 0;
         }
 
-        std::string inputFilename = args.at(ArgParse::possible[1]);
+        std::string inputFilename = parsedArgs.at(ArgParse::possible[1]);
         int iterations = 1;
-        if(args.contains(ArgParse::possible[9])){
-            iterations = std::stoi(args.at(ArgParse::possible[9]));
+        if(parsedArgs.contains(ArgParse::possible[9])){
+            iterations = std::stoi(parsedArgs.at(ArgParse::possible[9]));
         }
 
         if(access(inputFilename.c_str(),R_OK) != 0){
@@ -2055,13 +2045,13 @@ int main(int argc, char *argv[])
         }
 
         std::ifstream inputFile{inputFilename};
-        if(args.contains(ArgParse::possible[5])){
+        if(parsedArgs.contains(ArgParse::possible[5])){
             DEBUGLOG("running preprocessor");
             //this is a bit ugly, but it works
             std::stringstream ss;
 
             auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
-            ss << "cpp -E -P " << args.at(ArgParse::possible[1]) << " > /tmp/" << epochsecs << ".bpreprocessed";
+            ss << "cpp -E -P " << parsedArgs.at(ArgParse::possible[1]) << " > /tmp/" << epochsecs << ".bpreprocessed";
             system(ss.str().c_str());
 
             inputFile = std::ifstream{"/tmp/" + std::to_string(epochsecs) + ".bpreprocessed"};
@@ -2077,10 +2067,10 @@ int main(int argc, char *argv[])
         }
         auto parseEnd = std::chrono::high_resolution_clock::now();
 
-        if(args.contains(ArgParse::possible[5])) system("rm /tmp/*.bpreprocessed");
+        if(parsedArgs.contains(ArgParse::possible[5])) system("rm /tmp/*.bpreprocessed");
 
         auto semanalyzeStart = std::chrono::high_resolution_clock::now();
-        if(!args.contains(ArgParse::possible[7])){
+        if(!parsedArgs.contains(ArgParse::possible[7])){
             for(int i = 0; i<iterations; i++){
                 SemanticAnalysis::reset();
                 SemanticAnalysis::analyze(*ast);
@@ -2094,16 +2084,16 @@ int main(int argc, char *argv[])
 
         bool genSuccess = false;
 
-        if(args.contains(ArgParse::possible[4]) || args.contains(ArgParse::possible[2])){
-            if(args.contains(ArgParse::possible[6])){
+        if(parsedArgs.contains(ArgParse::possible[4]) || parsedArgs.contains(ArgParse::possible[2])){
+            if(parsedArgs.contains(ArgParse::possible[6])){
                 std::stringstream ss;
                 ast->printDOT(ss);
                 auto compactSpacesRegex = std::regex("\\s+");
                 auto str = std::regex_replace(ss.str(), compactSpacesRegex, " ");
                 std::cout << "https://dreampuf.github.io/GraphvizOnline/#" << url_encode(str) << std::endl;
-            }else if(args.contains(ArgParse::possible[2])){
-                if(args.contains(ArgParse::possible[3])){
-                    std::ofstream outputFile{args.at(ArgParse::possible[3])};
+            }else if(parsedArgs.contains(ArgParse::possible[2])){
+                if(parsedArgs.contains(ArgParse::possible[3])){
+                    std::ofstream outputFile{parsedArgs.at(ArgParse::possible[3])};
                     ast->printDOT(outputFile);
                     outputFile.close();
                 }else{
@@ -2112,10 +2102,10 @@ int main(int argc, char *argv[])
             }else{
                 ast->print(std::cout);
             }
-        }else if(args.contains(ArgParse::possible[10])){
-            if(args.contains(ArgParse::possible[3])){
+        }else if(parsedArgs.contains(ArgParse::possible[10])){
+            if(parsedArgs.contains(ArgParse::possible[3])){
                 std::error_code errorCode;
-                llvm::raw_fd_ostream outputFile{args.at(ArgParse::possible[3]), errorCode};
+                llvm::raw_fd_ostream outputFile{parsedArgs.at(ArgParse::possible[3]), errorCode};
                 if(!(genSuccess = Codegen::generate(*ast, outputFile))){
                     llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
                 }
@@ -2127,7 +2117,7 @@ int main(int argc, char *argv[])
             }
         }
         //print execution times
-        if(args.contains(ArgParse::possible[8])){
+        if(parsedArgs.contains(ArgParse::possible[8])){
             std::cout << "Average parse time (over "              << iterations << " iterations): " << (1e-9*std::chrono::duration_cast<std::chrono::nanoseconds>(parseEnd - parseStart).count())/((double)iterations)           << "s"  << std::endl;
             std::cout << "Average semantic analysis time: (over " << iterations << " iterations): " << (1e-9*std::chrono::duration_cast<std::chrono::nanoseconds>(semanalyzeEnd - semanalyzeStart).count())/((double)iterations) << "s"  << std::endl;
             std::cout << "Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                                                                                                       << "MB" << std::endl;

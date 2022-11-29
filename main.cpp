@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <sstream>
 #include <charconv>
+#include <queue>
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <llvm/IR/IRBuilder.h>
@@ -28,7 +29,7 @@ using std::string;
 using std::unique_ptr;
 
 #ifndef NDEBUG
-#define DEBUGLOG(x) std::cerr << x << std::endl; fflush(stderr);
+#define DEBUGLOG(x) llvm::errs() << x << "\n"; fflush(stderr);
 #else
 #define DEBUGLOG(x)
 #endif
@@ -40,33 +41,8 @@ using std::unique_ptr;
     throw std::runtime_error("TODO(Line " STRINGIZE_MACRO(__LINE__) "): Not implemented yet")
 
 
-// search for "HW 4" to find the start of the new code
+// search for "HW 6" to find the start of the new code
 
-/*
-Analysis answers:
-
-# Testing
-The codegenerator has been extensively tested, both for valid code, as well as correct semantics. Feel free to run the "test.sh" script and inspect the files it checks.
-(obviously all tests pass for me, I hope there is no non-portable nonsense going on...)
-
-# Reusing information/Scope handling
-First of all: Scope handling in this implementation is not great to say the least. I'm quite ashamed of how I did it in the end, its quite cumbersome, slow, and not programmatically nice.
-This is a result of not having considered scopes when originally designing the AST, I thought something along the lines of "I only need scopes in the semantic analysis,
-and I can do it on the fly there, no need to save them". Which is of course nonsense in retrospect, but I simply didn't consider the codegeneration phase back then,
-my inner german would say: "Again what learned" ;)
-But rewriting the whole datastructure architecture, semantic analysis, and the parts of the code generation that were already done at that point was just too much for me,
-I had already spent 3 whole days on the code generation alone, when the fact I need one map per scope even for the codegeneration really hit me, and I wasn't nearly done.
-
-So, after this laborious, boring and somewhat petty disclaimer here's the actual answer: had I considered the importance of scopes (and variable shadowing in particular) in the beginning (of writing the parser),
-I could have reused a lot of information from the semantic analysis, and stored a pointer to a scope (and managing those somewhere else) in each variable, making lookup much easier, without having to on the fly construct and dismantle scopes. But in this implementation I could only use the information about calls (-> implicit function declarations) and variable type (reg/auto) from the semantic analysis.
-
-# Obvious optimizations
-Piping the output of the compilation of samples/llvmAuto.b to llc shows that llc still uses the stack for parts of the auto variables, even though there are still registers available and their addresses are never needed. But llc does optimize the very heavy stack use, in the original IR to much lighter stack use, this can be seen when compiling with -O0 added to llc's args.
-This could be optimized even further, in order to store every auto variable in a register if possible.
-
-Because of the semantics of our language, we have to be able to handle ints on the left side of a subscript, as well as store the result of address-of in an int. This results in a lot of unnecessary casts, which could be, and are, optimized away.
-
-*/
 
 struct Token{
 public:
@@ -1339,14 +1315,6 @@ string url_encode(const string &value) {
     return escaped.str();
 }
 
-// ------------------------------------------------------------------------------------------------------
-// HW 4 START
-// Exceptions:
-// - main, obviously
-// - semantic analysis has been changed in order to determine external functions
-// - other minor changes in the parser
-// ------------------------------------------------------------------------------------------------------
-
 namespace Codegen{
     bool warningsGenerated{false};
 
@@ -1466,7 +1434,6 @@ namespace Codegen{
 
     // fills phi nodes with correct values, assumes block is sealed
     inline void fillPHIs(llvm::BasicBlock* block) noexcept{
-        //llvm::IRBuilder<> irb(block);
         for(auto& phi: block->phis()){
             for(auto pred: llvm::predecessors(block)){
                 phi.addIncoming(varmapLookup(pred, *(phisToResolve[&phi])), pred);
@@ -1549,12 +1516,8 @@ namespace Codegen{
                             return irb.CreateNeg(operand);
                         case Token::Type::LOGICAL_NOT:
                             {
-                                // this seems incredibly stupid, i hope its fine
-                                // should this be an i1? or do we just keep to i64 all the way through?
-                                //  after a bit of thinking: I think it's more adivsable to keep everything an i64 until it's absolutely necessary to convert it to an i1/ptr. Allows the operations that the language defines etc.
-                                auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_EQ, operand, irb.getInt64(0));
-                                //return irb.CreateSelect(cmp, irb.getInt64(true), irb.getInt1(false)); thats the line we would want for a normal language
-                                return irb.CreateSelect(cmp, irb.getInt64(1), irb.getInt64(0)); // but for C like stuff...
+                                auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_NE, operand, irb.getInt64(0));
+                                return irb.CreateZExt(cmp, i64);
                             }
                         case Token::Type::AMPERSAND:
                             {
@@ -1571,7 +1534,7 @@ namespace Codegen{
                     auto& lhsNode = *exprNode.children[0];
                     auto& rhsNode = *exprNode.children[1];
 
-                        // all the following locial ops need to return i64s to conform to the C like behavior we want
+                        // all the following logical ops need to return i64s to conform to the C like behavior we want
 
 #define ICAST(irb, x) irb.CreateIntCast((x), i64, false) // unsigned cast because we want 0 for false and 1 for true (instead of -1)
 
@@ -2008,6 +1971,7 @@ namespace Codegen{
     bool generate(AST& ast, llvm::raw_ostream& out){
         genRoot(ast.root);
 
+
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
         if(moduleIsBroken){
             moduleUP->print(llvm::errs(), nullptr);
@@ -2020,6 +1984,445 @@ namespace Codegen{
         return !moduleIsBroken;
     }
 
+}
+
+
+// ------------------------------------------------------------------------------------------------------
+// HW 6 START
+// Exceptions:
+// ------------------------------------------------------------------------------------------------------
+// Subset of LLVM IR used:
+// - Format: <instr>  [<operand type(s)>]
+// - Alloca           [i64]
+// - Load             [ptr]
+// - Store            [i64, ptr]
+// - Call             [return: i64, args: i64...]
+// - Bitwise Not      [i64]
+// - Negate           [i64]
+// - ICmp             [i64] (with ICMP_EQ, ICMP_NE, ICMP_SLT, ICMP_SLE, ICMP_SGT, ICMP_SGE)
+// - ZExt             [i64]
+// - SExt             [i64]
+// - PtrToInt         [ptr]
+// - IntToPtr         [i64]
+// - Or               [i64]
+// - And              [i64]
+// - Xor              [i64]
+// - Add              [i64]
+// - Sub              [i64]
+// - Mul              [i64]
+// - SDiv             [i64]
+// - SRem             [i64]
+// - Shl              [i64]
+// - AShr             [i64]
+// - GetElementPtr    [ptr, i64]
+// - Poison Values    [i64/ptr]
+//
+// Not relevant for this task, but used:
+// - PHIs             [i64, ptr]
+// - Br (cond/uncond) [i1]
+// - Ret              [i64]
+// - Unreachable
+//
+// ----------------------------------------------------
+// ARM (v8-A) subset used:
+// Control Flow:
+//      - Conditional Branches: CBNZ, CBZ (branch if not zero, branch if zero)
+//      - Unconditional Branches: B (immediate), BR (Branch to register), RET (return from subroutine)
+// Load/Store:
+//      - Load: LDR (load register)
+//      - Store: STR (store register)
+//
+//
+// ----------------------------------------------------
+// useful stuff im putting somewhere
+// llvm::isa<llvm::ReturnInst> (or isa_and_nonnull<>) and similar things can be used for checking if a value is of a certain type
+// llvm::dyn_cast<> should not be used for large chains of ifs, there is the InstVisitor class for that purpose
+// -> For the patterns and matching, use an InstVisitor, where each method depends on the root value type of the pattern,
+//    possibly hardcode which patterns are tried based on their root class, or try to do it with some compile time programming
+// Scratch this, the llvm::Instruction::... enum is much easier, and the InstVisitor is not really needed but maybe filtering the patterns
+// at compile time is still useful
+//
+
+namespace Codegen::ISel{
+
+
+    // TODO probably delete
+    //template<typename T>
+    //consteval std::vector<llvm::Value*> patternsMatchingType(std::vector<llvm::Value*> patterns [> this will be a list of patterns which in turn contain root values, but this is easier for now<]){
+    //    for(auto it = patterns.begin(); it!= patterns.end(); ){
+    //        auto pattern = *(it++);
+    //        if(!llvm::isa<T>(pattern)){
+    //            it = patterns.erase(it);
+    //        }
+    //    }
+    //    return patterns;
+    //}
+
+    // test, for the pattern matching
+    struct Pattern{
+    public:
+        static const Pattern emptyPattern;
+
+        const unsigned type{0};       // basically an enum member for type checks, will be initialized with llvm::Instruction::<type>
+                                      // find instruction types in include/llvm/IR/Instruction.def
+                                      // 0 means no type check with this requirement (but children/constants etc. still need to match)
+        const std::vector<Pattern> children{};
+        const unsigned totalSize;
+        const bool root{false};
+        const bool constant{false};  // checked value has to be a constant
+
+        struct PatternHash{
+            std::size_t operator()(const Pattern& p) const{
+                std::size_t hash = 0;
+                hash ^= std::hash<unsigned>{}(p.type);
+                hash ^= std::hash<bool>{}(p.root);
+                hash ^= std::hash<bool>{}(p.constant);
+                for(auto& child:p.children){
+                    hash ^= PatternHash{}(child);
+                }
+                return hash;
+            }
+        };
+
+        // == operator for hashing
+        bool operator==(const Pattern& other) const{
+            if(type != other.type || root != other.root || constant != other.constant || children.size() != other.children.size()){
+                return false;
+            }
+            for(unsigned int i = 0; i < children.size(); i++){
+                if(children[i] != other.children[i]){
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // map the roots of the patterns to their ARM replacement instructions (calls)
+        static std::unordered_map<Pattern, llvm::CallInst* (*)(llvm::IRBuilder<>&), PatternHash> replacementCalls;
+
+
+        llvm::CallInst* replaceWithARM(llvm::Instruction* instr){
+#define PUSH_OPS(i)                                                   \
+    for(auto& op: instr->operands()){                                 \
+        auto opInstr = llvm::dyn_cast_or_null<llvm::Instruction>(op); \
+        if(opInstr != nullptr){                                       \
+            toRemove.push(opInstr);                                   \
+        }                                                             \
+    }
+
+            llvm::IRBuilder<> irb{instr->getParent()};
+            auto root = instr;
+
+            irb.SetInsertPoint(root);
+            // generate the appropriate call instruction
+            auto call = Pattern::replacementCalls[*this](irb); 
+
+            // remove all operands of the instruction from the program
+            std::queue<llvm::Instruction*> toRemove{};
+            PUSH_OPS(instr);
+            while(!toRemove.empty()){ // TODO i can already see this making problems with the circularly referent PHIs
+                instr = toRemove.front();
+                toRemove.pop();
+
+                PUSH_OPS(instr);
+                DEBUGLOG("removing " << *instr);
+#ifndef NDEBUG
+                // normally it should only have one use. But because we also use it in the replacement call, it has two uses, so error on >=3
+                if(instr->hasNUsesOrMore(3)){ // TODO Uses() or Users() ?? Uses, right?
+                    llvm::errs() << "Critical: Instruction has more than one use, cannot be removed, pattern matching severly wrong, instr: " << *instr << ", num uses: " << instr->getNumUses() << "\n";
+                    // print users:
+                    for(auto user: instr->users()){
+                        llvm::errs() << "user: " << *user << "\n";
+                    }
+                    fflush(stderr);
+                    abort();
+                }
+#endif
+                instr->removeFromParent();
+                DEBUGLOG("success!")
+            }
+
+            root->replaceAllUsesWith(call);
+            root->removeFromParent();
+
+#undef PUSH_OPS
+
+            return call;
+        }
+
+    private:
+        // TODO consider removing the alternatives
+        const std::vector<Pattern> alternatives{}; // this is for the case where the pattern can be matched in multiple ways, e.g. an madd can be matched as [add x, [mul ...]] or [add [mul ...], x]
+                                                   // if alternatives are provided, the children and isMatching attributes are ignored
+
+        // TODO it might be worth having an alternative std::function for matching, which simply gets the llvm value as an argument and returns true if it matches,
+        // this would allow for arbitrary matching
+
+        unsigned calcTotalSize(std::vector<Pattern> children) const noexcept {
+            unsigned res = 1;
+            for(auto& child:children) res+=child.totalSize;
+            return res;
+        }
+
+        Pattern(unsigned isMatching, std::vector<Pattern> children, std::vector<Pattern> alternatives, bool constant, bool root) :
+            type(isMatching),
+            children(children),
+            totalSize(calcTotalSize(children)),
+            root(root),
+            constant(constant),
+            alternatives(alternatives)
+            {}
+
+    public:
+        Pattern(unsigned isMatching = 0, std::vector<Pattern> children = {}):
+            type(isMatching), children(children), totalSize(calcTotalSize(children))
+            {}
+
+        /// constructor like method for adding alternatives
+        static Pattern make_alternatives(std::initializer_list<Pattern> alternatives){
+            return Pattern(0, {}, alternatives, false, false);
+        }
+
+        /// constructor like method for making a constant requirement
+        static Pattern make_constant(){
+            return Pattern(0, {}, {}, true, false);
+        }
+
+        static Pattern make_root(llvm::CallInst* (*replacementCall)(llvm::IRBuilder<>&), unsigned isMatching = 0, std::vector<Pattern> children = {}, std::initializer_list<Pattern> alternatives = {}){
+        //static Pattern make_root(std::function<llvm::CallInst*(llvm::IRBuilder<>&)> replacementCall, unsigned isMatching = 0, std::vector<Pattern> children = {}, std::initializer_list<Pattern> alternatives = {}){
+            Pattern rootPattern{isMatching, children, alternatives, false, true};
+            Pattern::replacementCalls[rootPattern] = replacementCall;
+            return rootPattern;
+        }
+
+        // TODO delete
+        // example replacementCall function
+        //[](llvm::IRBuilder<>& irb){
+        //    // TODO this part changes for every pattern, do that
+        //    // TODO add args
+        //    return irb.CreateCall(llvm::Function::Create(llvm::FunctionType::get(i64, true), llvm::GlobalValue::ExternalLinkage, "STR", moduleUP.get()), {});
+        //};
+
+        /**
+         * The matching works thusly:
+         * - if there are alternatives, to this pattern, the pattern matches iff any of the alternatives match
+         * - 0 as an instruction type does not check the type of the instruction, but other checks are still performed
+         * - if the instruction type is not 0, it must match the instruction type of the value, if the value is not an instruction, it does not match
+         * - the number of children must match the number of operands to the instruction, except if there are 0 children, which indicates that the instruction has arbitrary operands
+         * - if the pattern (node) has a constant requirement, the value must be a constant and the constant must match
+         * - if the pattern (node) is neither the root, nor a leaf, this value must only have one user (which is the instruction that we are trying to match), so it can be deleted without affecting other instructions
+         * - all children patterns must also match their respective operands
+         *
+         * This basically boils down to tree matching with edge splitting on DAGs (any instruction except the root and those which are ignored, because they are empty require exactly one predecessor to match), with the DAG being the basic blocks of an llvm function
+         */
+        bool match(llvm::Value* val) const {
+            if(alternatives.empty()){
+                return matchSelf(val);
+            } else {
+                for(auto& alternative:alternatives)
+                    if(alternative.matchSelf(val)) return true;
+
+                return false;
+            }
+        }
+
+        /// applies `match` rules from match to val, but does not check alternatives
+        bool matchSelf(llvm::Value* val) const {
+            if(type!=0 && val->hasNUsesOrMore(2)) return false; // TODO check again. This requirement is important for all 'real' inner nodes, i.e. all except the root and leaves
+                                                           // leaves should have type 0
+                                                           // TODO hasOneUse() vs hasOneUser()
+
+            // constant check
+            if(constant){
+                return llvm::isa_and_nonnull<llvm::ConstantInt>(val);
+            }
+
+            auto inst = llvm::dyn_cast_or_null<llvm::Instruction>(val); // this also propagates nullptrs, and it just returns a null pointer if the cast failed, this saves us an isa<> check
+            if(type!=0 && 
+                 (inst==nullptr || inst->getOpcode() != type || (children.size() != 0 && children.size() != inst->getNumOperands()))){
+                return false;
+            }
+            for(unsigned int i = 0; i < children.size(); i++){
+                if(!children[i].match(inst->getOperand(i))){
+                    return false;
+                }
+            }
+            return true;
+        }
+    };
+
+    const Pattern Pattern::emptyPattern = Pattern{0,{},{}, false, false};;
+    std::unordered_map<Pattern, llvm::CallInst* (*)(llvm::IRBuilder<>&), Pattern::PatternHash> Pattern::replacementCalls{};
+
+    std::unordered_set<unsigned> skippableTypes{
+        llvm::Instruction::Br, // TODO handle conditional branches, need special handling for that
+        llvm::Instruction::Ret,
+        llvm::Instruction::Call,
+        llvm::Instruction::Unreachable,
+        llvm::Instruction::PHI,
+    };
+
+    /// for useful matching the patterns need to be sorted by totalSize (descending) here -> TODO: do this at compile time wherever the patterns are stored
+    std::unordered_map<llvm::Instruction*, Pattern&> matchPatterns(llvm::Function* func, std::vector<Pattern>& patterns){
+        std::unordered_map<llvm::Instruction*, Pattern&> matches{};
+        std::unordered_set<llvm::Instruction*> covered{};
+        for(auto& block:*func){
+            // iterate over the instructions in a bb in reverse order, to iterate over the dataflow top down
+            for(auto& instr:llvm::reverse(block)){
+
+                // skip returns branches, calls, etc.
+                if(skippableTypes.contains(instr.getOpcode())) continue;
+
+                // skip instructions that are already matched
+                if(covered.contains(&instr)) continue;
+                
+                // find largest pattern that matches
+                for(auto& pattern:patterns){
+                    if(pattern.match(&instr)){
+                        matches.emplace(&instr, pattern);
+                        // TODO this definitely would mess up the iterator, we need to somehow remove them afterwards, and skip them while iterating
+                        //pattern.replaceWithARM(&instr); 
+
+                        /*
+                          the following code boils down to:
+
+                          addCovered(&covered, &pattern, &instr){
+                              for(auto& child:instr->operands()){
+                                  covered[child] = pattern;
+                                  addCovered(covered, pattern, child);
+                              }
+                          }
+
+                        */
+
+                        std::queue<llvm::Instruction*> toEmplace{}; // lets not do this recursively...
+                        toEmplace.push(&instr);
+                        while(!toEmplace.empty()){
+                            // TODO i can already see this making problems with the circularly referent PHIs
+
+                            auto current = toEmplace.front();
+                            toEmplace.pop();
+                            covered.insert(current);
+                            
+                            // add remaining operands to queue
+                            for(auto& op:current->operands()){
+                                auto opInst = llvm::dyn_cast_or_null<llvm::Instruction>(op);
+                                if(opInst != nullptr){
+                                    toEmplace.push(opInst);
+                                }
+                            }
+                        }
+
+                        goto cont;
+                    }
+                }
+
+                llvm::errs() << "no pattern matched for instruction: " << instr << "\n";
+                THROW_TODO;
+
+cont:
+                continue; // for verbosity
+            }
+        }
+
+        // rewrite IR with the matched patterns
+        for(auto& [matchedInstr, matchedPattern]:matches){
+            matchedPattern.replaceWithARM(matchedInstr);
+        }
+
+        return matches;
+    }
+
+
+#define CREATE_INST_FN(name, ret, ...)                          \
+    {                                                           \
+        name,                                                   \
+        llvm::Function::Create(                                 \
+            llvm::FunctionType::get(ret, {__VA_ARGS__}, false), \
+            llvm::GlobalValue::ExternalLinkage,                 \
+            name,                                               \
+            *moduleUP                                           \
+        )                                                       \
+    }
+
+    /// functions to serve as substitute for actual ARM instructions
+    static std::unordered_map<string, llvm::Function*> instructionFunctions{
+        CREATE_INST_FN("ARM_madd", i64, i64, i64, i64),
+    };
+
+#undef CREATE_INST_FN
+
+    // TODO delete/move
+    void test(){
+        // multiply add (one variant)
+        std::vector<Pattern> patterns{
+            // TODO how do i deal with root alternatives? There the root wouldn't be a root and wouldn't be in the replacementCall map, but still match
+            // first idea: return which pattern matched in the match function, and then use that to replace the instruction
+            // second idae: just remove alternatives...
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+                    // first 2 args is mul, last one is add
+                    auto* mul = llvm::dyn_cast<llvm::Instruction>(instr->getOperand(0));
+                    auto mulOp1 = mul->getOperand(0);
+                    auto mulOp2 = mul->getOperand(1);
+
+                    auto addOp2 = instr->getOperand(1);
+
+                    auto fn = instructionFunctions["ARM_madd"];
+                    return irb.CreateCall(fn, {mulOp1, mulOp2, addOp2});
+                },
+                llvm::Instruction::Add,
+                {
+                    {llvm::Instruction::Mul, {}, },
+                    {},
+                }
+            ),
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+
+                    // first 2 args is mul, last one is add
+                    auto* mul = llvm::dyn_cast<llvm::Instruction>(instr->getOperand(1));
+                    auto mulOp1 = mul->getOperand(0);
+                    auto mulOp2 = mul->getOperand(1);
+
+                    auto addOp2 = instr->getOperand(0);
+
+                    auto fn = instructionFunctions["ARM_madd"];
+                    return irb.CreateCall(fn, {mulOp1, mulOp2, addOp2});
+                },
+                llvm::Instruction::Add,
+                {
+                    {},
+                    {llvm::Instruction::Mul, {}},
+                }
+            ),
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+
+                    auto fn = instructionFunctions["ARM_madd"];
+                    return irb.CreateCall(fn, {instr->getOperand(0), instr->getOperand(1), irb.getInt64(0)});
+                },
+                llvm::Instruction::Mul,
+                {
+                } // no requirements for the children, because there are necessarily just 2
+            ),
+        };
+
+        // TODO sort by size descending
+        //std::sort(patterns.begin(), patterns.end(), [](auto& a, auto& b){
+        //    return a.totalSize > b.totalSize;
+        //});
+
+
+        auto fn = &*moduleUP->functions().begin();
+        matchPatterns(fn, patterns);
+        moduleUP->print(llvm::outs(), nullptr);
+        bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
+        if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
+    }
 }
 
 
@@ -2114,6 +2517,7 @@ int main(int argc, char *argv[])
                 if(!(genSuccess = Codegen::generate(*ast, llvm::outs()))){
                     llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
                 }
+                Codegen::ISel::test();
             }
         }
         //print execution times

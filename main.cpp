@@ -2325,29 +2325,15 @@ namespace Codegen::ISel{
                             
                             // add remaining operands to queue
                             // iterating over children means, that if they are empty, we ignore them, which is what we want
-                            DEBUGLOG("node " << *current << " has " << current->getNumOperands() << " operands, pattern has " << currentPattern->children.size() << " children");
                             for(unsigned i = 0; i < currentPattern->children.size(); i++){
                                 if(currentPattern->children[i].type!=0){ // this also guarantees that this is not a constant
                                     auto op = current->getOperand(i);
                                     auto opInstr = llvm::dyn_cast<llvm::Instruction>(op);
                                     coveredInsertionQueue.push(opInstr);
-                                    DEBUGLOG("Inserting " << *opInstr << " into coveredInsertionQueue");
                                     patternQueue.push(currentPattern->children.data()+i);
                                 }
-#ifndef NDEBUG
-                                else {
-                                    DEBUGLOG("skipping operand " << *current->getOperand(i) << " because its a constant or not matched");
-                                }
-#endif
                             }
                         }
-                        DEBUGLOG("matched " << instr << ", with pattern of size " << pattern.totalSize);
-                        DEBUGLOG("covered: " << covered.size() << " nodes, all covered nodes: \n");
-#ifndef NDEBUG
-                        for(auto& coveredNode:covered){
-                            DEBUGLOG(*coveredNode << "\n");
-                        }
-#endif
 
                         goto cont;
                     }
@@ -2763,7 +2749,6 @@ int main(int argc, char *argv[])
 
         std::ifstream inputFile{inputFilename};
         if(parsedArgs.contains(ArgParse::possible[5])){
-            DEBUGLOG("running preprocessor");
             //this is a bit ugly, but it works
             std::stringstream ss;
 

@@ -1318,9 +1318,10 @@ string url_encode(const string &value) {
 namespace Codegen{
     bool warningsGenerated{false};
 
-    llvm::LLVMContext ctx;
+    llvm::LLVMContext ctx{};
     auto moduleUP = std::make_unique<llvm::Module>("mod", ctx);
     llvm::Type* i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::Type* voidTy = llvm::Type::getVoidTy(ctx);
     llvm::Function* currentFunction = nullptr;
 
     void warn(const std::string& msg, llvm::Instruction* instr = nullptr){
@@ -1511,9 +1512,8 @@ namespace Codegen{
                         // can be TILDE, MINUS, AMPERSAND, LOGICAL_NOT
                         case Token::Type::TILDE:
                             return irb.CreateNot(operand); // i hope this is the right kind of not
-                            break;
                         case Token::Type::MINUS:
-                            return irb.CreateNeg(operand);
+                            return irb.CreateNeg(operand); // creates a sub with 0 as first op
                         case Token::Type::LOGICAL_NOT:
                             {
                                 auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_NE, operand, irb.getInt64(0));
@@ -1987,61 +1987,63 @@ namespace Codegen{
 }
 
 
-// ------------------------------------------------------------------------------------------------------
-// HW 6 START
-// Exceptions:
-// ------------------------------------------------------------------------------------------------------
-// Subset of LLVM IR used:
-// - Format: <instr>  [<operand type(s)>]
-// - Alloca           [i64]
-// - Load             [ptr]
-// - Store            [i64, ptr]
-// - Call             [return: i64, args: i64...]
-// - Bitwise Not      [i64]
-// - Negate           [i64]
-// - ICmp             [i64] (with ICMP_EQ, ICMP_NE, ICMP_SLT, ICMP_SLE, ICMP_SGT, ICMP_SGE)
-// - ZExt             [i64]
-// - SExt             [i64]
-// - PtrToInt         [ptr]
-// - IntToPtr         [i64]
-// - Or               [i64]
-// - And              [i64]
-// - Xor              [i64]
-// - Add              [i64]
-// - Sub              [i64]
-// - Mul              [i64]
-// - SDiv             [i64]
-// - SRem             [i64]
-// - Shl              [i64]
-// - AShr             [i64]
-// - GetElementPtr    [ptr, i64]
-// - Poison Values    [i64/ptr]
-//
-// Not relevant for this task, but used:
-// - PHIs             [i64, ptr]
-// - Br (cond/uncond) [i1]
-// - Ret              [i64]
-// - Unreachable
-//
-// ----------------------------------------------------
-// ARM (v8-A) subset used:
-// Control Flow:
-//      - Conditional Branches: CBNZ, CBZ (branch if not zero, branch if zero)
-//      - Unconditional Branches: B (immediate), BR (Branch to register), RET (return from subroutine)
-// Load/Store:
-//      - Load: LDR (load register)
-//      - Store: STR (store register)
-//
-//
-// ----------------------------------------------------
-// useful stuff im putting somewhere
-// llvm::isa<llvm::ReturnInst> (or isa_and_nonnull<>) and similar things can be used for checking if a value is of a certain type
-// llvm::dyn_cast<> should not be used for large chains of ifs, there is the InstVisitor class for that purpose
-// -> For the patterns and matching, use an InstVisitor, where each method depends on the root value type of the pattern,
-//    possibly hardcode which patterns are tried based on their root class, or try to do it with some compile time programming
-// Scratch this, the llvm::Instruction::... enum is much easier, and the InstVisitor is not really needed but maybe filtering the patterns
-// at compile time is still useful
-//
+/*
+ ------------------------------------------------------------------------------------------------------
+ HW 6 START
+ Exceptions:
+ ------------------------------------------------------------------------------------------------------
+ Subset of LLVM IR used (checks/not checks: done/not done):
+ -     Format: <instr>  [<operand type(s)>]
+ - [ ] Alloca           [i64]
+ - [x] Load             [ptr]
+ - [x] Store            [i64, ptr]
+ - [x] Bitwise Not      [i64] (transformed by llvm)
+ - [x] Negate           [i64] (transformed by llvm)
+ - [ ] ICmp             [i64] (with ICMP_EQ, ICMP_NE, ICMP_SLT, ICMP_SLE, ICMP_SGT, ICMP_SGE)
+ - [ ] ZExt             [i64]
+ - [x] SExt             [i64] (used in exactly 2 places: storing from subscripts, and loading from subscripts)
+ - [?] PtrToInt         [ptr]
+ - [?] IntToPtr         [i64]
+ - [x] Or               [i64]
+ - [x] And              [i64]
+ - [x] Xor              [i64]
+ - [x] Add              [i64]
+ - [x] Sub              [i64]
+ - [x] Mul              [i64]
+ - [x] SDiv             [i64]
+ - [ ] SRem             [i64]
+ - [x] Shl              [i64]
+ - [x] AShr             [i64]
+ - [ ] GetElementPtr    [ptr, i64]
+ - [ ] Br (cond/uncond) [i1]
+
+ Not relevant for this task, but used:
+ - Call             [return: i64, args: i64...]
+ - PHIs             [i64, ptr]
+ - Ret              [i64]
+ - Poison Values    [i64/ptr]
+ - Unreachable
+
+ ----------------------------------------------------
+ ARM (v8-A) subset used:
+ Control Flow:
+      - Conditional Branches: CBNZ, CBZ (branch if not zero, branch if zero)
+      - Unconditional Branches: B (immediate), BR (Branch to register), RET (return from subroutine)
+ Load/Store:
+      - Load: LDR (load register)
+      - Store: STR (store register)
+
+
+ ----------------------------------------------------
+ useful stuff im putting somewhere
+ llvm::isa<llvm::ReturnInst> (or isa_and_nonnull<>) and similar things can be used for checking if a value is of a certain type
+ llvm::dyn_cast<> should not be used for large chains of ifs, there is the InstVisitor class for that purpose
+ -> For the patterns and matching, use an InstVisitor, where each method depends on the root value type of the pattern,
+    possibly hardcode which patterns are tried based on their root class, or try to do it with some compile time programming
+ Scratch this, the llvm::Instruction::... enum is much easier, and the InstVisitor is not really needed but maybe filtering the patterns
+ at compile time is still useful
+
+ */
 
 namespace Codegen::ISel{
 
@@ -2183,9 +2185,11 @@ namespace Codegen::ISel{
             return Pattern(0, {}, alternatives, false, false);
         }
 
+        static const Pattern constantPattern;
+
         /// constructor like method for making a constant requirement
         static Pattern make_constant(){
-            return Pattern(0, {}, {}, true, false);
+            return constantPattern;
         }
 
         static Pattern make_root(llvm::CallInst* (*replacementCall)(llvm::IRBuilder<>&), unsigned isMatching = 0, std::vector<Pattern> children = {}, std::initializer_list<Pattern> alternatives = {}){
@@ -2253,6 +2257,7 @@ namespace Codegen::ISel{
 
     const Pattern Pattern::emptyPattern = Pattern{0,{},{}, false, false};;
     std::unordered_map<Pattern, llvm::CallInst* (*)(llvm::IRBuilder<>&), Pattern::PatternHash> Pattern::replacementCalls{};
+    const Pattern Pattern::constantPattern = Pattern(0, {}, {}, true, false);
 
     std::unordered_set<unsigned> skippableTypes{
         llvm::Instruction::Br, // TODO handle conditional branches, need special handling for that
@@ -2345,20 +2350,83 @@ cont:
         )                                                       \
     }
 
+#define CREATE_INST_FN_VARARGS(name, ret)                  \
+    {                                                           \
+        name,                                                   \
+        llvm::Function::Create(                                 \
+            llvm::FunctionType::get(ret, {}, true), \
+            llvm::GlobalValue::ExternalLinkage,                 \
+            name,                                               \
+            *moduleUP                                           \
+        )                                                       \
+    }
+
     /// functions to serve as substitute for actual ARM instructions
-    static std::unordered_map<string, llvm::Function*> instructionFunctions{
-        CREATE_INST_FN("ARM_madd", i64, i64, i64, i64),
-    };
+    static std::unordered_map<string, llvm::Function*> instructionFunctions;
+
+    static void initInstructionFunctions(){
+        // for some obscure reason, adding this in a static initializer stops the pattern matching from working
+        instructionFunctions = {
+            CREATE_INST_FN("ARM_add",       i64, i64, i64),
+            CREATE_INST_FN("ARM_add_SHIFT", i64, i64, i64,  i64),
+            CREATE_INST_FN("ARM_sub",       i64, i64, i64),
+            CREATE_INST_FN("ARM_sub_SHIFT", i64, i64, i64,  i64),
+            CREATE_INST_FN("ARM_madd",      i64, i64, i64,  i64),
+            CREATE_INST_FN("ARM_msub",      i64, i64, i64,  i64),
+            CREATE_INST_FN("ARM_sdiv",      i64, i64, i64),
+
+            // TODO take care of cmp things, try to merge flag setting with flag consuming, but I don't think this is universally possible
+            CREATE_INST_FN("ARM_cmp",      i64, i64, i64),
+
+            // shifts by variable and immediate amount
+            CREATE_INST_FN("ARM_lsl_imm",  i64,  i64, i64),
+            CREATE_INST_FN("ARM_lsl_var",  i64,  i64, i64),
+            CREATE_INST_FN("ARM_asr_imm",  i64,  i64, i64),
+            CREATE_INST_FN("ARM_asr_var",  i64,  i64, i64),
+
+            // bitwise
+            CREATE_INST_FN("ARM_and",      i64, i64, i64),
+            CREATE_INST_FN("ARM_orr",      i64, i64, i64),
+            CREATE_INST_FN("ARM_eor",      i64, i64, i64), // XOR
+
+            // mov
+            CREATE_INST_FN("ARM_mov",      i64, i64),
+            CREATE_INST_FN("ARM_mov_shift",i64,  i64, i64),
+
+            // memory access
+            // (with varargs to be able to simulate the different addressing modes)
+            CREATE_INST_FN_VARARGS("ARM_ldr",      i64),
+            CREATE_INST_FN_VARARGS("ARM_ldr_sb",   i64),
+            CREATE_INST_FN_VARARGS("ARM_ldr_sh",   i64),
+            CREATE_INST_FN_VARARGS("ARM_ldr_sw",   i64),
+            CREATE_INST_FN_VARARGS("ARM_str",   voidTy),
+            CREATE_INST_FN_VARARGS("ARM_str_b", voidTy),
+            CREATE_INST_FN_VARARGS("ARM_str_h", voidTy),
+
+            // control flow/branches
+            CREATE_INST_FN("ARM_b_cond", llvm::Type::getInt1Ty(ctx)),
+            CREATE_INST_FN("ARM_b",      voidTy),
+            CREATE_INST_FN("ARM_b_cbnz", llvm::Type::getInt1Ty(ctx),  i64),
+        };
+    }
 
 #undef CREATE_INST_FN
 
+    // ARM zero register, technically not necessary, but its nice programatically, in order not to use immediate operands where its not possible
+    auto XZR = llvm::ConstantInt::get(i64, 0);
+
     // TODO delete/move
     void test(){
+
+        initInstructionFunctions();
+
         // multiply add (one variant)
         std::vector<Pattern> patterns{
             // TODO how do i deal with root alternatives? There the root wouldn't be a root and wouldn't be in the replacementCall map, but still match
             // first idea: return which pattern matched in the match function, and then use that to replace the instruction
             // second idae: just remove alternatives...
+
+            // madd
             Pattern::make_root(
                 [](llvm::IRBuilder<>& irb){
                     auto instr = &*irb.GetInsertPoint();
@@ -2387,10 +2455,10 @@ cont:
                     auto mulOp1 = mul->getOperand(0);
                     auto mulOp2 = mul->getOperand(1);
 
-                    auto addOp2 = instr->getOperand(0);
+                    auto addOp1 = instr->getOperand(0);
 
                     auto fn = instructionFunctions["ARM_madd"];
-                    return irb.CreateCall(fn, {mulOp1, mulOp2, addOp2});
+                    return irb.CreateCall(fn, {mulOp1, mulOp2, addOp1});
                 },
                 llvm::Instruction::Add,
                 {
@@ -2398,16 +2466,188 @@ cont:
                     {llvm::Instruction::Mul, {}},
                 }
             ),
+
+            // msub
             Pattern::make_root(
                 [](llvm::IRBuilder<>& irb){
                     auto instr = &*irb.GetInsertPoint();
 
-                    auto fn = instructionFunctions["ARM_madd"];
-                    return irb.CreateCall(fn, {instr->getOperand(0), instr->getOperand(1), irb.getInt64(0)});
+                    // first 2 args is mul, last one is sub
+                    auto* mul = llvm::dyn_cast<llvm::Instruction>(instr->getOperand(1));
+                    auto mulOp1 = mul->getOperand(0);
+                    auto mulOp2 = mul->getOperand(1);
+
+                    auto subOp1 = instr->getOperand(0);
+
+                    auto fn = instructionFunctions["ARM_msub"];
+                    return irb.CreateCall(fn, {mulOp1, mulOp2, subOp1});
+                },
+                llvm::Instruction::Sub,
+                {
+                    {},
+                    {llvm::Instruction::Mul, {}},
+                }
+            ),
+
+#define TWO_OPERAND_INSTR_PATTERN(llvmInstr, armInstr)                                                                    \
+            Pattern::make_root(                                                                                           \
+                [](llvm::IRBuilder<>& irb){                                                                               \
+                    auto instr = &*irb.GetInsertPoint();                                                                  \
+                    return irb.CreateCall(instructionFunctions[(armInstr)], {instr->getOperand(0), instr->getOperand(1)}); \
+                },                                                                                                        \
+                llvm::Instruction::llvmInstr,                                                                                   \
+                {} /* no requirements for the children, because there are necessarily just 2*/                            \
+            ),
+
+
+            // add, sub, mul, div
+            TWO_OPERAND_INSTR_PATTERN(Add, "ARM_add")
+            TWO_OPERAND_INSTR_PATTERN(Sub, "ARM_sub")
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+                    return irb.CreateCall(instructionFunctions["ARM_madd"], {instr->getOperand(0), instr->getOperand(1), XZR});
                 },
                 llvm::Instruction::Mul,
+                {} /* no requirements for the children, because there are necessarily just 2*/
+            ),
+            TWO_OPERAND_INSTR_PATTERN(SDiv, "ARM_sdiv")
+
+            // shifts
+            // logical left shift
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+                    return irb.CreateCall(instructionFunctions["ARM_lsl_imm"], {instr->getOperand(0), instr->getOperand(1)});
+                },
+                llvm::Instruction::Shl,
                 {
-                } // no requirements for the children, because there are necessarily just 2
+                    {},
+                    {Pattern::make_constant()}
+                }
+            ),
+            TWO_OPERAND_INSTR_PATTERN(Shl, "ARM_lsl_var")
+
+            // arithmetic shift right
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+                    return irb.CreateCall(instructionFunctions["ARM_asr_imm"], {instr->getOperand(0), instr->getOperand(1)});
+                },
+                llvm::Instruction::AShr,
+                {
+                    {},
+                    {Pattern::make_constant()}
+                }
+            ),
+            TWO_OPERAND_INSTR_PATTERN(AShr, "ARM_asr_var")
+
+            // bitwise ops
+            TWO_OPERAND_INSTR_PATTERN(And, "ARM_and")
+            TWO_OPERAND_INSTR_PATTERN(Or, "ARM_orr")
+            TWO_OPERAND_INSTR_PATTERN(Xor, "ARM_eor")
+
+            // memory
+
+            // sign extends can only happen before loads/stores:
+            // load with sign extension
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto* sextInstr = llvm::dyn_cast<llvm::SExtInst>(&*irb.GetInsertPoint());
+                    auto args = {sextInstr->getOperand(0)};
+
+                    switch(sextInstr->getSrcTy()->getIntegerBitWidth()){
+                        case 8:
+                            return irb.CreateCall(instructionFunctions["ARM_ldr_sb"], args);
+                        case 16:
+                            return irb.CreateCall(instructionFunctions["ARM_ldr_sh"], args);
+                        case 32:
+                            return irb.CreateCall(instructionFunctions["ARM_ldr_sw"], args);
+                        default: // on 64, the sext is not created by llvm:
+                            // TODO some error
+                            exit(1);
+                    }
+                },
+                llvm::Instruction::SExt,
+                {
+                    {llvm::Instruction::Load}
+                }
+            ),
+            // store with sign extension
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto* sextInstr = llvm::dyn_cast<llvm::SExtInst>(&*irb.GetInsertPoint());
+                    auto args = {sextInstr->getOperand(0), sextInstr->getOperand(1)};
+
+                    switch(sextInstr->getSrcTy()->getIntegerBitWidth()){
+                        case 8:
+                            return irb.CreateCall(instructionFunctions["ARM_str_b"], args);
+                        case 16:
+                            return irb.CreateCall(instructionFunctions["ARM_str_h"], args);
+                        case 32:
+                            return irb.CreateCall(instructionFunctions["ARM_str"], args); // not exactly sure if this would be a different case in actual assembly
+                        default: // on 64, the sext is not created by llvm
+                            // TODO some error
+                            exit(1);
+                    }
+                },
+                llvm::Instruction::SExt,
+                {
+                    {llvm::Instruction::Store}
+                }
+            ),
+
+
+            // TODO there need to be patterns to handle subscript operations before these
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+                    return irb.CreateCall(instructionFunctions["ARM_ldr"], {instr->getOperand(0)});
+                },
+                llvm::Instruction::Load,
+                {}
+            ),
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+                    return irb.CreateCall(instructionFunctions["ARM_str"], {instr->getOperand(0), instr->getOperand(1)});
+                },
+                llvm::Instruction::Store,
+                {}
+            ),
+
+            // control flow/branches
+            // conditional branches always have an icmp NE as their condition, if we match them before the unconditional ones, the plain Br match without children always matches only unconditional ones
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = &*irb.GetInsertPoint();
+                    auto cond = instr->getOperand(0);
+                    auto trueBlock = llvm::dyn_cast<llvm::BasicBlock>(instr->getOperand(1));
+                    auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(instr->getOperand(2));
+
+                    auto fn = instructionFunctions["ARM_b_cbnz"];
+                    auto call = irb.CreateCall(fn, {cond, trueBlock, falseBlock});
+                    // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                    irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
+                    return call;
+                },
+                llvm::Instruction::Br,
+                {
+                    {llvm::Instruction::ICmp, {}}, // no requirements, because it can only be NE
+                    {}, // TODO check that this matches
+                    {},
+                }
+            ),
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr = dyn_cast<llvm::BranchInst>(&*irb.GetInsertPoint());
+                    auto call = irb.CreateCall(instructionFunctions["ARM_b"], {instr->getOperand(0)});
+                    // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                    irb.CreateBr(instr->getSuccessor(0)); // TODO this could make problems with use checking before deletion...
+                    return call;
+                },
+                llvm::Instruction::Br,
+                {}
             ),
         };
 

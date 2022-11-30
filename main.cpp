@@ -2102,15 +2102,20 @@ namespace Codegen::ISel{
         // map the roots of the patterns to their ARM replacement instructions (calls)
         static std::unordered_map<Pattern, llvm::CallInst* (*)(llvm::IRBuilder<>&), PatternHash> replacementCalls;
 
-
         llvm::CallInst* replaceWithARM(llvm::Instruction* instr){
-#define PUSH_OPS(i)                                                   \
-    for(auto& op: instr->operands()){                                 \
-        auto opInstr = llvm::dyn_cast_or_null<llvm::Instruction>(op); \
-        if(opInstr != nullptr){                                       \
-            toRemove.push(opInstr);                                   \
-        }                                                             \
+
+#define PUSH_OPS(inst,currentPattern)                                                                  \
+    /* iterating over children means, that if they are empty, we ignore them, which is what we want */ \
+    for(unsigned i = 0; i < currentPattern->children.size(); i++){                                     \
+        if(currentPattern->children[i].type!=0){                                                       \
+            auto op = instr->getOperand(i);                                                            \
+            auto opInstr = llvm::dyn_cast<llvm::Instruction>(op);                                      \
+            assert(opInstr != nullptr);                                                                \
+            toRemove.push(opInstr);                                                                    \
+            patternQueue.push(currentPattern->children.data()+i);                                      \
+        }                                                                                              \
     }
+            // TODO the problem is that all ops are pushed, not just those that match
 
             llvm::IRBuilder<> irb{instr->getParent()};
             auto root = instr;
@@ -2121,12 +2126,15 @@ namespace Codegen::ISel{
 
             // remove all operands of the instruction from the program
             std::queue<llvm::Instruction*> toRemove{};
-            PUSH_OPS(instr);
+            std::queue<const Pattern*> patternQueue{}; // TODO validate the pattern queue thing
+            PUSH_OPS(instr, this);
             while(!toRemove.empty()){ // TODO i can already see this making problems with the circularly referent PHIs
                 instr = toRemove.front();
                 toRemove.pop();
 
-                PUSH_OPS(instr);
+                PUSH_OPS(instr, patternQueue.front());
+                patternQueue.pop();
+
                 DEBUGLOG("removing " << *instr);
 #ifndef NDEBUG
                 // normally it should only have one use. But because we also use it in the replacement call, it has two uses, so error on >=3
@@ -2162,7 +2170,7 @@ namespace Codegen::ISel{
 
         unsigned calcTotalSize(std::vector<Pattern> children) const noexcept {
             unsigned res = 1;
-            for(auto& child:children) res+=child.totalSize;
+            for(auto& child:children) if(child.type!=0 || child.constant) res+=child.totalSize;
             return res;
         }
 
@@ -2260,7 +2268,6 @@ namespace Codegen::ISel{
     const Pattern Pattern::constantPattern = Pattern(0, {}, {}, true, false);
 
     std::unordered_set<unsigned> skippableTypes{
-        llvm::Instruction::Br, // TODO handle conditional branches, need special handling for that
         llvm::Instruction::Ret,
         llvm::Instruction::Call,
         llvm::Instruction::Unreachable,
@@ -2300,23 +2307,47 @@ namespace Codegen::ISel{
 
                         */
 
-                        std::queue<llvm::Instruction*> toEmplace{}; // lets not do this recursively...
-                        toEmplace.push(&instr);
-                        while(!toEmplace.empty()){
+                        std::queue<const Pattern*> patternQueue{}; // TODO validate the pattern queue thing
+                        patternQueue.push(&pattern);
+
+                        // TODO same problem as above in the instruction deletion: this just uses all operands and does not stop at the children of the pattern
+                        std::queue<llvm::Instruction*> coveredInsertionQueue{}; // lets not do this recursively...
+                        coveredInsertionQueue.push(&instr);
+                        while(!coveredInsertionQueue.empty()){
                             // TODO i can already see this making problems with the circularly referent PHIs
 
-                            auto current = toEmplace.front();
-                            toEmplace.pop();
+                            auto current = coveredInsertionQueue.front();
+                            auto currentPattern = patternQueue.front();
+                            coveredInsertionQueue.pop();
+                            patternQueue.pop();
+
                             covered.insert(current);
                             
                             // add remaining operands to queue
-                            for(auto& op:current->operands()){
-                                auto opInst = llvm::dyn_cast_or_null<llvm::Instruction>(op);
-                                if(opInst != nullptr){
-                                    toEmplace.push(opInst);
+                            // iterating over children means, that if they are empty, we ignore them, which is what we want
+                            DEBUGLOG("node " << *current << " has " << current->getNumOperands() << " operands, pattern has " << currentPattern->children.size() << " children");
+                            for(unsigned i = 0; i < currentPattern->children.size(); i++){
+                                if(currentPattern->children[i].type!=0){ // this also guarantees that this is not a constant
+                                    auto op = current->getOperand(i);
+                                    auto opInstr = llvm::dyn_cast<llvm::Instruction>(op);
+                                    coveredInsertionQueue.push(opInstr);
+                                    DEBUGLOG("Inserting " << *opInstr << " into coveredInsertionQueue");
+                                    patternQueue.push(currentPattern->children.data()+i);
                                 }
+#ifndef NDEBUG
+                                else {
+                                    DEBUGLOG("skipping operand " << *current->getOperand(i) << " because its a constant or not matched");
+                                }
+#endif
                             }
                         }
+                        DEBUGLOG("matched " << instr << ", with pattern of size " << pattern.totalSize);
+                        DEBUGLOG("covered: " << covered.size() << " nodes, all covered nodes: \n");
+#ifndef NDEBUG
+                        for(auto& coveredNode:covered){
+                            DEBUGLOG(*coveredNode << "\n");
+                        }
+#endif
 
                         goto cont;
                     }
@@ -2404,9 +2435,9 @@ cont:
             CREATE_INST_FN_VARARGS("ARM_str_h", voidTy),
 
             // control flow/branches
-            CREATE_INST_FN("ARM_b_cond", llvm::Type::getInt1Ty(ctx)),
-            CREATE_INST_FN("ARM_b",      voidTy),
-            CREATE_INST_FN("ARM_b_cbnz", llvm::Type::getInt1Ty(ctx),  i64),
+            CREATE_INST_FN("ARM_b_cond",    llvm::Type::getInt1Ty(ctx)),
+            CREATE_INST_FN_VARARGS("ARM_b", voidTy),
+            CREATE_INST_FN("ARM_b_cbnz",    llvm::Type::getInt1Ty(ctx),  i64),
         };
     }
 
@@ -2620,20 +2651,63 @@ cont:
             // conditional branches always have an icmp NE as their condition, if we match them before the unconditional ones, the plain Br match without children always matches only unconditional ones
             Pattern::make_root(
                 [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    auto cond = instr->getOperand(0);
-                    auto trueBlock = llvm::dyn_cast<llvm::BasicBlock>(instr->getOperand(1));
+                    auto instr      = &*irb.GetInsertPoint();
+                    auto cond       = instr->getOperand(0);
+                    auto innerCond  =
+                        llvm::dyn_cast<llvm::ICmpInst>(
+                            llvm::dyn_cast<llvm::ZExtInst>(
+                                llvm::dyn_cast<llvm::ICmpInst>(cond)->getOperand(0))->getOperand(0));
+                    auto pred       = innerCond->getPredicate();
+                    auto predStr    = llvm::ICmpInst::getPredicateName(pred);
+
+                    // get llvm string literal which displayes predStr
+                    auto predStrLiteral = llvm::ConstantDataArray::getString(irb.getContext(), predStr);
+
+                    auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(instr->getOperand(1));
+                    auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(instr->getOperand(2));
+
+                    auto fn = instructionFunctions["ARM_b_cond"];
+
+                    auto call = irb.CreateCall(fn, {predStrLiteral});
+                    // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                    irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
+                    return call;
+                },
+                llvm::Instruction::Br, // conditional branch after 'normal' comparison
+                {
+                    {
+                        llvm::Instruction::ICmp, 
+                        {
+                            {
+                                llvm::Instruction::ZExt,
+                                {
+                                    llvm::Instruction::ICmp
+                                }
+                            },
+                            {}
+                        }
+                    },
+                    {}, // TODO check that this matches
+                    {},
+                }
+            ),
+            Pattern::make_root(
+                [](llvm::IRBuilder<>& irb){
+                    auto instr      = &*irb.GetInsertPoint();
+                    auto cond       = llvm::dyn_cast<llvm::ICmpInst>(instr->getOperand(0));
+                    auto condInner  = cond->getOperand(0);
+                    auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(instr->getOperand(1));
                     auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(instr->getOperand(2));
 
                     auto fn = instructionFunctions["ARM_b_cbnz"];
-                    auto call = irb.CreateCall(fn, {cond, trueBlock, falseBlock});
+                    auto call = irb.CreateCall(fn, {condInner});
                     // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
                     irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
                     return call;
                 },
                 llvm::Instruction::Br,
                 {
-                    {llvm::Instruction::ICmp, {}}, // no requirements, because it can only be NE
+                    {llvm::Instruction::ICmp}, // no requirements, because it can only be NE
                     {}, // TODO check that this matches
                     {},
                 }

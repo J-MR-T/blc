@@ -1144,6 +1144,7 @@ namespace SemanticAnalysis{
 
 }
 
+
 namespace ArgParse{
     struct Arg{
         std::string shortOpt{""};
@@ -1153,6 +1154,7 @@ namespace ArgParse{
         bool required{false};
         bool flag{false};
 
+
         //define < operator, necessary for map
         bool operator<(const Arg& other) const{
             return shortOpt < other.shortOpt;
@@ -1160,22 +1162,37 @@ namespace ArgParse{
     };
 
     std::map<Arg, std::string> parsedArgs{};
+    
+    // struct for all possible arguments
+    const struct {
+        const Arg help{"h", "help", 0, "Show this help message and exit",  false, true};
+        const Arg input{"i", "input", 1, "Input file",  true, false};
+        const Arg dot{"d", "dot", 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)", false, true};
+        const Arg output{"o", "output", 2, "Output file for AST (requires -p)", false, false};
+        const Arg print{"p", "print", 0, "Print AST (-d for DOT format highly recommended instead)", false, true};
+        const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it", false, true};
+        const Arg url{"u", "url", 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser (requires -d or -p)", false, true};
+        const Arg nosemantic{"n", "nosemantic", 0, "Don't run semantic analysis on the AST", false, true};
+        const Arg benchmark{"b", "benchmark", 0, "Time execution time for parsing and semantic analysis and print memory footprint", false, true};
+        const Arg iterations{"",  "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)", false, false};
+        const Arg llvm{"l", "llvm", 0, "Output LLVM IR (mutually exclusive with p/d/u), by default to stdout, except if an output file is specified using -o", false, true};
+        const Arg nowarn{"w", "nowarn", 0, "Do not generate warnings during the LLVM codegeneration phase (has no effect unless -l is specified)", false, true};
+        const Arg isel{"s", "isel", 0, "Run the custom ARM instruction selector (has no effect unless -l is specified)", false, true};
 
-    // possible arguments
-    const std::array<Arg,12> possible{{
-        {"h", "help", 0, "Show this help message and exit",  false, true},
-        {"i", "input", 1, "Input file",  true, false},
-        {"d", "dot", 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)", false, true},
-        {"o", "output", 2, "Output file for AST (requires -p)", false, false},
-        {"p", "print", 0, "Print AST (-d for DOT format highly recommended instead)", false, true},
-        {"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it", false, true},
-        {"u", "url", 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser (requires -d or -p)", false, true},
-        {"n", "nosemantic", 0, "Don't run semantic analysis on the AST", false, true},
-        {"b", "benchmark", 0, "Time execution time for parsing and semantic analysis and print memory footprint", false, true},
-        {"",  "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)", false, false},
-        {"l",  "llvm", 0, "Output LLVM IR (mutually exclusive with p/d/u), by default to stdout, except if an output file is specified using -o", false, true},
-        {"w",  "nowarn", 0, "Do not generate warnings during the LLVM codegeneration phase (has no effect unless -l is specified)", false, true},
-    }};
+
+        const Arg sentinel{"", "", 0, "", false, false};
+
+        const Arg* const all[14] = {&help, &input, &dot, &output, &print, &preprocess, &url, &nosemantic, &benchmark, &iterations, &llvm, &nowarn, &isel, &sentinel};
+        
+        // iterator over all
+        const Arg* begin() const{
+            return all[0];
+        }
+
+        const Arg* end() const{
+            return all[13];
+        }
+    } possible;
 
     void printHelp(){
         std::cerr << "A Parser for a B like language" << std::endl;
@@ -1283,6 +1300,7 @@ cont:
 
 }
 
+
 // taken from https://stackoverflow.com/a/17708801
 string url_encode(const string &value) {
     std::ostringstream escaped;
@@ -1317,7 +1335,7 @@ namespace Codegen{
     llvm::Function* currentFunction = nullptr;
 
     void warn(const std::string& msg, llvm::Instruction* instr = nullptr){
-        if(!ArgParse::parsedArgs.contains(ArgParse::possible[11])){
+        if(!ArgParse::parsedArgs.contains(ArgParse::possible.nowarn)){
             llvm::errs() << "Warning: " << msg;
             if(instr != nullptr){
                 llvm::errs() << " at " << *instr;
@@ -2990,15 +3008,15 @@ int main(int argc, char *argv[])
     try{
         auto parsedArgs = ArgParse::parse(argc, argv);
 
-        if(parsedArgs.contains(ArgParse::possible[0])){
+        if(parsedArgs.contains(ArgParse::possible.help)){
             ArgParse::printHelp();
             return 0;
         }
 
-        std::string inputFilename = parsedArgs.at(ArgParse::possible[1]);
+        std::string inputFilename = parsedArgs.at(ArgParse::possible.input);
         int iterations = 1;
-        if(parsedArgs.contains(ArgParse::possible[9])){
-            iterations = std::stoi(parsedArgs.at(ArgParse::possible[9]));
+        if(parsedArgs.contains(ArgParse::possible.iterations)){
+            iterations = std::stoi(parsedArgs.at(ArgParse::possible.iterations));
         }
 
         if(access(inputFilename.c_str(),R_OK) != 0){
@@ -3007,12 +3025,12 @@ int main(int argc, char *argv[])
         }
 
         std::ifstream inputFile{inputFilename};
-        if(parsedArgs.contains(ArgParse::possible[5])){
+        if(parsedArgs.contains(ArgParse::possible.preprocess)){
             //this is a bit ugly, but it works
             std::stringstream ss;
 
             auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
-            ss << "cpp -E -P " << parsedArgs.at(ArgParse::possible[1]) << " > /tmp/" << epochsecs << ".bpreprocessed";
+            ss << "cpp -E -P " << parsedArgs.at(ArgParse::possible.input) << " > /tmp/" << epochsecs << ".bpreprocessed";
             system(ss.str().c_str());
 
             inputFile = std::ifstream{"/tmp/" + std::to_string(epochsecs) + ".bpreprocessed"};
@@ -3028,10 +3046,10 @@ int main(int argc, char *argv[])
         }
         auto parseEnd = std::chrono::high_resolution_clock::now();
 
-        if(parsedArgs.contains(ArgParse::possible[5])) system("rm /tmp/*.bpreprocessed");
+        if(parsedArgs.contains(ArgParse::possible.preprocess)) system("rm /tmp/*.bpreprocessed");
 
         auto semanalyzeStart = std::chrono::high_resolution_clock::now();
-        if(!parsedArgs.contains(ArgParse::possible[7])){
+        if(!parsedArgs.contains(ArgParse::possible.nosemantic)){
             for(int i = 0; i<iterations; i++){
                 SemanticAnalysis::reset();
                 SemanticAnalysis::analyze(*ast);
@@ -3045,16 +3063,16 @@ int main(int argc, char *argv[])
 
         bool genSuccess = false;
 
-        if(parsedArgs.contains(ArgParse::possible[4]) || parsedArgs.contains(ArgParse::possible[2])){
-            if(parsedArgs.contains(ArgParse::possible[6])){
+        if(parsedArgs.contains(ArgParse::possible.print) || parsedArgs.contains(ArgParse::possible.dot)){
+            if(parsedArgs.contains(ArgParse::possible.url)){
                 std::stringstream ss;
                 ast->printDOT(ss);
                 auto compactSpacesRegex = std::regex("\\s+");
                 auto str = std::regex_replace(ss.str(), compactSpacesRegex, " ");
                 std::cout << "https://dreampuf.github.io/GraphvizOnline/#" << url_encode(str) << std::endl;
-            }else if(parsedArgs.contains(ArgParse::possible[2])){
-                if(parsedArgs.contains(ArgParse::possible[3])){
-                    std::ofstream outputFile{parsedArgs.at(ArgParse::possible[3])};
+            }else if(parsedArgs.contains(ArgParse::possible.dot)){
+                if(parsedArgs.contains(ArgParse::possible.output)){
+                    std::ofstream outputFile{parsedArgs.at(ArgParse::possible.output)};
                     ast->printDOT(outputFile);
                     outputFile.close();
                 }else{
@@ -3063,10 +3081,10 @@ int main(int argc, char *argv[])
             }else{
                 ast->print(std::cout);
             }
-        }else if(parsedArgs.contains(ArgParse::possible[10])){
-            if(parsedArgs.contains(ArgParse::possible[3])){
+        }else if(parsedArgs.contains(ArgParse::possible.llvm)){
+            if(parsedArgs.contains(ArgParse::possible.output)){
                 std::error_code errorCode;
-                llvm::raw_fd_ostream outputFile{parsedArgs.at(ArgParse::possible[3]), errorCode};
+                llvm::raw_fd_ostream outputFile{parsedArgs.at(ArgParse::possible.output), errorCode};
                 if(!(genSuccess = Codegen::generate(*ast, outputFile))){
                     llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
                 }
@@ -3075,11 +3093,12 @@ int main(int argc, char *argv[])
                 if(!(genSuccess = Codegen::generate(*ast, llvm::outs()))){
                     llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
                 }
+                // TODO call ISel
                 Codegen::ISel::test();
             }
         }
         //print execution times
-        if(parsedArgs.contains(ArgParse::possible[8])){
+        if(parsedArgs.contains(ArgParse::possible.benchmark)){
             std::cout << "Average parse time (over "              << iterations << " iterations): " << (1e-9*std::chrono::duration_cast<std::chrono::nanoseconds>(parseEnd - parseStart).count())/((double)iterations)           << "s"  << std::endl;
             std::cout << "Average semantic analysis time: (over " << iterations << " iterations): " << (1e-9*std::chrono::duration_cast<std::chrono::nanoseconds>(semanalyzeEnd - semanalyzeStart).count())/((double)iterations) << "s"  << std::endl;
             std::cout << "Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                                                                                                       << "MB" << std::endl;

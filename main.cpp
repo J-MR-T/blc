@@ -1218,10 +1218,12 @@ namespace ArgParse{
         }
 
         std::cerr << std::endl;
-        std::cerr << "Example: " << std::endl;
-        std::cerr << "  " << "main -i input.b -p -d -o output.dot" << std::endl;
-        std::cerr << "  " << "main input.b -pd output.dot" << std::endl;
-        std::cerr << "  " << "main input.b -pdu" << std::endl;
+        std::cerr << "Examples: " << std::endl;
+        std::cerr << "  "         << "main -i input.b -p -d -o output.dot" << std::endl;
+        std::cerr << "  "         << "main input.b -pd output.dot"         << std::endl;
+        std::cerr << "  "         << "main input.b -pdu"                   << std::endl;
+        std::cerr << "  "         << "main -lE input.b"                    << std::endl;
+        std::cerr << "  "         << "main -ls input.b"                    << std::endl;
     }
 
     //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
@@ -1363,6 +1365,7 @@ namespace Codegen{
     std::unordered_map<llvm::PHINode*, ASTNode*> phisToResolve{};
 
 
+    // REFACTOR: cache the result in a hash map
     llvm::Function* findFunction(string name){
         auto fnIt = llvm::find_if(moduleUP->functions(), [&name](auto& func){return func.getName() == name;});
         if(fnIt == moduleUP->functions().end()){
@@ -2139,7 +2142,7 @@ namespace Codegen::ISel{
         // map the roots of the patterns to their ARM replacement instructions (calls)
         static std::unordered_map<Pattern, llvm::CallInst* (*)(llvm::IRBuilder<>&), PatternHash> replacementCalls;
 
-        void replaceWithARM(llvm::Instruction* instr){
+        void replaceWithARM(llvm::Instruction* instr) const{
 
 #define PUSH_OPS(inst,currentPattern)                                                                  \
     /* iterating over children means, that if they are empty, we ignore them, which is what we want */ \
@@ -2290,8 +2293,8 @@ namespace Codegen::ISel{
     };
 
     /// for useful matching the patterns need to be sorted by totalSize (descending) here -> TODO: do this at compile time wherever the patterns are stored
-    std::unordered_map<llvm::Instruction*, Pattern&> matchPatterns(llvm::Function* func, std::vector<Pattern>& patterns){
-        std::unordered_map<llvm::Instruction*, Pattern&> matches{};
+    std::unordered_map<llvm::Instruction*, const Pattern&> matchPatterns(llvm::Function* func, const std::vector<Pattern>& patterns){
+        std::unordered_map<llvm::Instruction*, const Pattern&> matches{};
         std::unordered_set<llvm::Instruction*> covered{};
         for(auto& block:*func){
             // iterate over the instructions in a bb in reverse order, to iterate over the dataflow top down
@@ -2397,15 +2400,15 @@ cont:
     static void initInstructionFunctions(){
         // for some obscure reason, adding this in a static initializer stops the pattern matching from working
         instructionFunctions = {
-            CREATE_INST_FN("ARM_add",       i64, i64, i64),
-            CREATE_INST_FN("ARM_add_SP",    voidTy, i64), // simulate add to stack pointer
-            CREATE_INST_FN("ARM_add_SHIFT", voidTy, i64, i64,  i64),
-            CREATE_INST_FN("ARM_sub",       i64, i64, i64),
+            CREATE_INST_FN("ARM_add",       i64,                            i64,  i64),
+            CREATE_INST_FN("ARM_add_SP",    voidTy,                         i64), // simulate add to stack pointer
+            CREATE_INST_FN("ARM_add_SHIFT", i64,                            i64,  i64,                               i64),
+            CREATE_INST_FN("ARM_sub",       i64,                            i64,  i64),
             CREATE_INST_FN("ARM_sub_SP",    llvm::Type::getInt64PtrTy(ctx), i64), // simulate sub from stack pointer
-            CREATE_INST_FN("ARM_sub_SHIFT", llvm::Type::getInt64PtrTy(ctx), i64, i64,  i64),
-            CREATE_INST_FN("ARM_madd",      i64, i64, i64,  i64),
-            CREATE_INST_FN("ARM_msub",      i64, i64, i64,  i64),
-            CREATE_INST_FN("ARM_sdiv",      i64, i64, i64),
+            CREATE_INST_FN("ARM_sub_SHIFT", i64,                            i64,  i64,                               i64),
+            CREATE_INST_FN("ARM_madd",      i64,                            i64,  i64,                               i64),
+            CREATE_INST_FN("ARM_msub",      i64,                            i64,  i64,                               i64),
+            CREATE_INST_FN("ARM_sdiv",      i64,                            i64,  i64),
 
             // TODO take care of cmp things, try to merge flag setting with flag consuming, but I don't think this is universally possible
             CREATE_INST_FN("ARM_cmp",      i64, i64, i64),
@@ -2425,6 +2428,7 @@ cont:
 
             // mov
             CREATE_INST_FN("ARM_mov",       i64, i64),
+            CREATE_INST_FN("ARM_mov_ptr",   i64, llvm::Type::getInt64PtrTy(ctx)),
             CREATE_INST_FN("ARM_mov_shift", i64, i64,  i64),
 
             // memory access
@@ -2453,16 +2457,6 @@ cont:
     // ARM zero register, technically not necessary, but its nice programatically, in order not to use immediate operands where its not possible
     auto XZR = llvm::ConstantInt::get(i64, 0);
 
-    // TODO delete/move
-    // TODO do this for multiple functions
-    void test(){
-
-        initInstructionFunctions();
-
-        // TODO whats still missing is something to consume the GEP generated for subscripts with & operands before them
-
-        // TODO
-        // check that all ops which are possibly encoded as immediates, actually fit into the respective immediate encoding
 
 #define MAYBE_MAT_CONST(value)                                                                           \
         (llvm::isa<llvm::ConstantInt>(value) && (!llvm::dyn_cast<llvm::ConstantInt>(value)->isZero())) ? \
@@ -2479,496 +2473,500 @@ cont:
 #define OP_N(instr, N) \
         instr->getOperand(N)
 
+    /// all ARM patterns
+    /// these are matched in order, so they are roughly sorted by size
+    const std::vector<Pattern> patterns{
+        // madd
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                // first 2 args is mul, last one is add
+                auto* mul = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,0));
+                auto mulOp1 = OP_N_MAT(mul, 0);
+                auto mulOp2 = OP_N_MAT(mul, 1);
 
-        std::vector<Pattern> patterns{
-            // TODO how do i deal with root alternatives? There the root wouldn't be a root and wouldn't be in the replacementCall map, but still match
-            // first idea: return which pattern matched in the match function, and then use that to replace the instruction
-            // second idae: just remove alternatives...
+                auto addOp2 = OP_N_MAT(instr, 1);
 
-            // madd
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    // first 2 args is mul, last one is add
-                    auto* mul = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,0));
-                    auto mulOp1 = OP_N_MAT(mul, 0);
-                    auto mulOp2 = OP_N_MAT(mul, 1);
+                auto fn = instructionFunctions["ARM_madd"];
+                return irb.CreateCall(fn, {mulOp1, mulOp2, addOp2});
+            },
+            llvm::Instruction::Add,
+            {
+                {llvm::Instruction::Mul, {}, },
+                {},
+            }
+        ),
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
 
-                    auto addOp2 = OP_N_MAT(instr, 1);
+                // first 2 args is mul, last one is add
+                auto* mul = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
+                auto mulOp1 = OP_N_MAT(mul,0);
+                auto mulOp2 = OP_N_MAT(mul,1);
 
-                    auto fn = instructionFunctions["ARM_madd"];
-                    return irb.CreateCall(fn, {mulOp1, mulOp2, addOp2});
-                },
-                llvm::Instruction::Add,
-                {
-                    {llvm::Instruction::Mul, {}, },
-                    {},
-                }
-            ),
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
+                auto addOp1 = OP_N_MAT(instr,0);
 
-                    // first 2 args is mul, last one is add
-                    auto* mul = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
-                    auto mulOp1 = OP_N_MAT(mul,0);
-                    auto mulOp2 = OP_N_MAT(mul,1);
+                auto fn = instructionFunctions["ARM_madd"];
+                return irb.CreateCall(fn, {mulOp1, mulOp2, addOp1});
+            },
+            llvm::Instruction::Add,
+            {
+                {},
+                {llvm::Instruction::Mul, {}},
+            }
+        ),
 
-                    auto addOp1 = OP_N_MAT(instr,0);
+        // msub
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
 
-                    auto fn = instructionFunctions["ARM_madd"];
-                    return irb.CreateCall(fn, {mulOp1, mulOp2, addOp1});
-                },
-                llvm::Instruction::Add,
-                {
-                    {},
-                    {llvm::Instruction::Mul, {}},
-                }
-            ),
+                // first 2 args is mul, last one is sub
+                auto* mul = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
+                auto mulOp1 = OP_N_MAT(mul,0);
+                auto mulOp2 = OP_N_MAT(mul,1);
 
-            // msub
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
+                auto subOp1 = OP_N_MAT(instr,0);
 
-                    // first 2 args is mul, last one is sub
-                    auto* mul = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
-                    auto mulOp1 = OP_N_MAT(mul,0);
-                    auto mulOp2 = OP_N_MAT(mul,1);
-
-                    auto subOp1 = OP_N_MAT(instr,0);
-
-                    auto fn = instructionFunctions["ARM_msub"];
-                    return irb.CreateCall(fn, {mulOp1, mulOp2, subOp1});
-                },
-                llvm::Instruction::Sub,
-                {
-                    {},
-                    {llvm::Instruction::Mul, {}},
-                }
-            ),
+                auto fn = instructionFunctions["ARM_msub"];
+                return irb.CreateCall(fn, {mulOp1, mulOp2, subOp1});
+            },
+            llvm::Instruction::Sub,
+            {
+                {},
+                {llvm::Instruction::Mul, {}},
+            }
+        ),
 
 #define TWO_OPERAND_INSTR_PATTERN(llvmInstr, armInstr)                                                               \
-            Pattern::make_root(                                                                                      \
-                [](llvm::IRBuilder<>& irb){                                                                          \
-                    auto instr = &*irb.GetInsertPoint();                                                             \
-                    return irb.CreateCall(instructionFunctions[(armInstr)], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)}); \
-                },                                                                                                   \
-                llvm::Instruction::llvmInstr,                                                                        \
-                {}                                                                                                   \
-            ),
+        Pattern::make_root(                                                                                      \
+            [](llvm::IRBuilder<>& irb){                                                                          \
+                auto instr = &*irb.GetInsertPoint();                                                             \
+                return irb.CreateCall(instructionFunctions[(armInstr)], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)}); \
+            },                                                                                                   \
+            llvm::Instruction::llvmInstr,                                                                        \
+            {}                                                                                                   \
+        ),
 
 
-            // add, sub, mul, div
-            TWO_OPERAND_INSTR_PATTERN(Add, "ARM_add") // TODO their second operand can be an immediate, handle that
-            TWO_OPERAND_INSTR_PATTERN(Sub, "ARM_sub") 
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    return irb.CreateCall(instructionFunctions["ARM_madd"], {OP_N_MAT(instr,0), OP_N_MAT(instr,1), XZR});
-                },
-                llvm::Instruction::Mul,
-                {}
-            ),
-            TWO_OPERAND_INSTR_PATTERN(SDiv, "ARM_sdiv")
-            // remainder
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    auto quotient = irb.CreateCall(instructionFunctions["ARM_sdiv"],  {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
-                    return irb.CreateCall(instructionFunctions["ARM_msub"], {quotient, OP_N_MAT(instr,1), OP_N_MAT(instr,0)}); // remainder = numerator - (quotient * denominator)
-                },
-                llvm::Instruction::SRem,
-                {}
-            ),
+        // add, sub, mul, div
+        TWO_OPERAND_INSTR_PATTERN(Add, "ARM_add") // TODO their second operand can be an immediate, handle that
+        TWO_OPERAND_INSTR_PATTERN(Sub, "ARM_sub") 
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                return irb.CreateCall(instructionFunctions["ARM_madd"], {OP_N_MAT(instr,0), OP_N_MAT(instr,1), XZR});
+            },
+            llvm::Instruction::Mul,
+            {}
+        ),
+        TWO_OPERAND_INSTR_PATTERN(SDiv, "ARM_sdiv")
+        // remainder
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                auto quotient = irb.CreateCall(instructionFunctions["ARM_sdiv"],  {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
+                return irb.CreateCall(instructionFunctions["ARM_msub"], {quotient, OP_N_MAT(instr,1), OP_N_MAT(instr,0)}); // remainder = numerator - (quotient * denominator)
+            },
+            llvm::Instruction::SRem,
+            {}
+        ),
 
-            // shifts
-            // logical left shift
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    return irb.CreateCall(instructionFunctions["ARM_lsl_imm"], {OP_N_MAT(instr,0), OP_N(instr,1)});
-                },
-                llvm::Instruction::Shl,
-                {
-                    {},
-                    {Pattern::make_constant()}
+        // shifts
+        // logical left shift
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                return irb.CreateCall(instructionFunctions["ARM_lsl_imm"], {OP_N_MAT(instr,0), OP_N(instr,1)});
+            },
+            llvm::Instruction::Shl,
+            {
+                {},
+                {Pattern::make_constant()}
+            }
+        ),
+        TWO_OPERAND_INSTR_PATTERN(Shl, "ARM_lsl_var")
+
+        // arithmetic shift right
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                return irb.CreateCall(instructionFunctions["ARM_asr_imm"], {OP_N_MAT(instr,0), OP_N(instr,1)});
+            },
+            llvm::Instruction::AShr,
+            {
+                {},
+                {Pattern::make_constant()}
+            }
+        ),
+        TWO_OPERAND_INSTR_PATTERN(AShr, "ARM_asr_var")
+
+        // bitwise ops
+        TWO_OPERAND_INSTR_PATTERN(And, "ARM_and")
+        TWO_OPERAND_INSTR_PATTERN(Or, "ARM_orr")
+        TWO_OPERAND_INSTR_PATTERN(Xor, "ARM_eor")
+
+        // memory
+
+        // alloca
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto stackVar = irb.CreateCall(instructionFunctions["ARM_sub_SP"], {irb.getInt64(8)}); // always exactly 8
+                currentFunctionBytesToFreeAtEnd+=8;
+
+                return stackVar;
+            },
+            llvm::Instruction::Alloca // always allocates an i64 in our case
+                                       // there is always a store that uses this alloca, but to not delete/replace it, we match the alloca itself
+        ),
+
+        // sign extends can only happen after loadsA
+        // truncation can only happen before stores
+        // load with sign extension
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto* sextInstr     = llvm::dyn_cast<llvm::SExtInst>(&*irb.GetInsertPoint());
+                auto* loadInstr     = llvm::dyn_cast<llvm::LoadInst>(OP_N(sextInstr,0));
+                auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(loadInstr->getPointerOperand());
+                auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
+                auto bitwidthOfLoad = loadInstr->getType()->getIntegerBitWidth();
+
+
+                switch(bitwidthOfLoad){
+                // args: base, offset, offsetshift
+                    case 8:
+                        return irb.CreateCall(instructionFunctions["ARM_ldr_sb"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
+                    case 16:
+                        return irb.CreateCall(instructionFunctions["ARM_ldr_sh"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
+                    case 32:
+                        return irb.CreateCall(instructionFunctions["ARM_ldr_sw"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
+                    default: // on 64, the sext is not created by llvm:
+                        // TODO some error
+                        exit(1);
                 }
-            ),
-            TWO_OPERAND_INSTR_PATTERN(Shl, "ARM_lsl_var")
-
-            // arithmetic shift right
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    return irb.CreateCall(instructionFunctions["ARM_asr_imm"], {OP_N_MAT(instr,0), OP_N(instr,1)});
-                },
-                llvm::Instruction::AShr,
+            },
+            llvm::Instruction::SExt,
+            {
                 {
-                    {},
-                    {Pattern::make_constant()}
-                }
-            ),
-            TWO_OPERAND_INSTR_PATTERN(AShr, "ARM_asr_var")
-
-            // bitwise ops
-            TWO_OPERAND_INSTR_PATTERN(And, "ARM_and")
-            TWO_OPERAND_INSTR_PATTERN(Or, "ARM_orr")
-            TWO_OPERAND_INSTR_PATTERN(Xor, "ARM_eor")
-
-            // memory
-
-            // alloca
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto stackVar = irb.CreateCall(instructionFunctions["ARM_sub_SP"], {irb.getInt64(8)}); // always exactly 8
-                    currentFunctionBytesToFreeAtEnd+=8;
-
-                    return stackVar;
-                },
-                llvm::Instruction::Alloca // always allocates an i64 in our case
-                                           // there is always a store that uses this alloca, but to not delete/replace it, we match the alloca itself
-            ),
-
-            // sign extends can only happen after loadsA
-            // truncation can only happen before stores
-            // load with sign extension
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto* sextInstr     = llvm::dyn_cast<llvm::SExtInst>(&*irb.GetInsertPoint());
-                    auto* loadInstr     = llvm::dyn_cast<llvm::LoadInst>(OP_N(sextInstr,0));
-                    auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(loadInstr->getPointerOperand());
-                    auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
-                    auto bitwidthOfLoad = loadInstr->getType()->getIntegerBitWidth();
-
-
-                    switch(bitwidthOfLoad){
-                    // args: base, offset, offsetshift
-                        case 8:
-                            return irb.CreateCall(instructionFunctions["ARM_ldr_sb"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
-                        case 16:
-                            return irb.CreateCall(instructionFunctions["ARM_ldr_sh"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
-                        case 32:
-                            return irb.CreateCall(instructionFunctions["ARM_ldr_sw"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
-                        default: // on 64, the sext is not created by llvm:
-                            // TODO some error
-                            exit(1);
-                    }
-                },
-                llvm::Instruction::SExt,
-                {
+                    llvm::Instruction::Load,
                     {
-                        llvm::Instruction::Load,
                         {
+                            llvm::Instruction::GetElementPtr,
                             {
-                                llvm::Instruction::GetElementPtr,
                                 {
-                                    {
-                                        llvm::Instruction::IntToPtr // int to ptr arg is an arbitrary expression
-                                    },
-                                    {} // index
-                                }
+                                    llvm::Instruction::IntToPtr // int to ptr arg is an arbitrary expression
+                                },
+                                {} // index
                             }
                         }
                     }
                 }
-            ),
-            // same pattern as above, just without the sign extension
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto* loadInstr     = llvm::dyn_cast<llvm::LoadInst>(&*irb.GetInsertPoint());
-                    auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(loadInstr->getPointerOperand());
-                    auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
+            }
+        ),
+        // same pattern as above, just without the sign extension
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto* loadInstr     = llvm::dyn_cast<llvm::LoadInst>(&*irb.GetInsertPoint());
+                auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(loadInstr->getPointerOperand());
+                auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
 
-                    // because it doesn't have a sign extension, it is guaranteed to be a 64 bit load
-                    return irb.CreateCall(instructionFunctions["ARM_ldr"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 i.e. times 8
-                },
-                llvm::Instruction::Load,
+                // because it doesn't have a sign extension, it is guaranteed to be a 64 bit load
+                return irb.CreateCall(instructionFunctions["ARM_ldr"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 i.e. times 8
+            },
+            llvm::Instruction::Load,
+            {
                 {
+                    llvm::Instruction::GetElementPtr,
                     {
-                        llvm::Instruction::GetElementPtr,
                         {
-                            {
-                                llvm::Instruction::IntToPtr // int to ptr arg is an arbitrary expression
-                            },
-                            {} // index
-                        }
+                            llvm::Instruction::IntToPtr // int to ptr arg is an arbitrary expression
+                        },
+                        {} // index
                     }
                 }
-            ),
+            }
+        ),
 
-            // store with truncation
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto* storeInst     = llvm::dyn_cast<llvm::StoreInst>(&*irb.GetInsertPoint());
-                    auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(storeInst->getPointerOperand());
-                    auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
-                    auto* truncInstr    = llvm::dyn_cast<llvm::TruncInst>(storeInst->getValueOperand());
-                    auto bitwidthOfStore = truncInstr->getType()->getIntegerBitWidth();
-                    
-                    switch(bitwidthOfStore){
-                    // args: value, base, offset, offsetshift
-                        case 8:
-                            return irb.CreateCall(instructionFunctions["ARM_str32_b"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
-                        case 16:
-                            return irb.CreateCall(instructionFunctions["ARM_str32_h"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
-                        case 32:
-                            return irb.CreateCall(instructionFunctions["ARM_str32"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
-                        default: // on 64, the trunc is not created by llvm:
-                            // TODO some error
-                            exit(1);
-                    }
-                },
-                llvm::Instruction::Store,
-                { 
-                    // store arg is cast to the target type, so truncated, or target is already i64. This case handles truncation
-                    {
-                        llvm::Instruction::Trunc
-                    },
-                    {
-                        llvm::Instruction::GetElementPtr,
-                        {
-                            {
-                                llvm::Instruction::IntToPtr
-                            },
-                            {} // index
-                        }
-                    },
+        // store with truncation
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto* storeInst     = llvm::dyn_cast<llvm::StoreInst>(&*irb.GetInsertPoint());
+                auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(storeInst->getPointerOperand());
+                auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
+                auto* truncInstr    = llvm::dyn_cast<llvm::TruncInst>(storeInst->getValueOperand());
+                auto bitwidthOfStore = truncInstr->getType()->getIntegerBitWidth();
+                
+                switch(bitwidthOfStore){
+                // args: value, base, offset, offsetshift
+                    case 8:
+                        return irb.CreateCall(instructionFunctions["ARM_str32_b"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
+                    case 16:
+                        return irb.CreateCall(instructionFunctions["ARM_str32_h"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
+                    case 32:
+                        return irb.CreateCall(instructionFunctions["ARM_str32"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
+                    default: // on 64, the trunc is not created by llvm:
+                        // TODO some error
+                        exit(1);
                 }
-            ),
-            // store without truncation
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto* storeInst     = llvm::dyn_cast<llvm::StoreInst>(&*irb.GetInsertPoint());
-                    auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(storeInst->getPointerOperand());
-                    auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
-                    // without truncaton -> no bitwidth check necessary
-                    return irb.CreateCall(instructionFunctions["ARM_str"], {OP_N_MAT(storeInst, 0), OP_N_MAT(intToPtrInstr, 0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 for multiplying by 8
-                },
-                llvm::Instruction::Store,
-                { 
-                    // store arg is cast to the target type, so truncated, or target is already i64. This case handles non-truncation i.e. arbitrary first (value) arg
-                    {},
-                    {
-                        llvm::Instruction::GetElementPtr,
-                        {
-                            {
-                                llvm::Instruction::IntToPtr
-                            },
-                            {} // index
-                        }
-                    },
-                }
-            ),
-
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    return irb.CreateCall(instructionFunctions["ARM_ldr"], {OP_N_MAT(instr,0)});
-                },
-                llvm::Instruction::Load,
-                {}
-            ),
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    return irb.CreateCall(instructionFunctions["ARM_str"], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
-                },
-                llvm::Instruction::Store,
-                {}
-            ),
-
-            // subscript with addrof
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    // add instruction for address calculation
-                    auto* ptrToInt = llvm::dyn_cast<llvm::PtrToIntInst>(irb.GetInsertPoint());
-                    auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrToInt->getPointerOperand());
-                    auto* intToPtr = llvm::dyn_cast<llvm::IntToPtrInst>(gep->getOperand(0));
-
-                    unsigned shiftInt = 0;
-                    switch(gep->getSourceElementType()->getIntegerBitWidth()){
-                        case 8: shiftInt = 0; break;
-                        case 16: shiftInt = 1; break;
-                        case 32: shiftInt = 2; break;
-                        case 64: shiftInt = 3; break;
-                        default:
-                            //TODO error
-                            exit(1);
-                    }
-
-                    auto indexOp = OP_N(gep, 1);
-                    DEBUGLOG("indexOp: " << *indexOp);
-                    llvm::ConstantInt* indexConst;
-                    // TODO is there any problem with the constant not being deleted?
-                    if((indexConst = llvm::dyn_cast_or_null<llvm::ConstantInt>(indexOp))!= nullptr){
-                        auto index = indexConst->getSExtValue();
-                        return irb.CreateCall(instructionFunctions["ARM_add"], {OP_N_MAT(intToPtr,0), irb.getInt64(index << shiftInt)});
-                    } else {
-                        return irb.CreateCall(instructionFunctions["ARM_add_SHIFT"], {OP_N_MAT(intToPtr, 0), indexOp, irb.getInt64(shiftInt)});
-                    }
-                },
-                llvm::Instruction::PtrToInt,
+            },
+            llvm::Instruction::Store,
+            { 
+                // store arg is cast to the target type, so truncated, or target is already i64. This case handles truncation
                 {
+                    llvm::Instruction::Trunc
+                },
+                {
+                    llvm::Instruction::GetElementPtr,
                     {
-                        llvm::Instruction::GetElementPtr,
                         {
-                            {
-                                llvm::Instruction::IntToPtr
-                            },
-                            {} // index operand can be arbitrary
-                        }
+                            llvm::Instruction::IntToPtr
+                        },
+                        {} // index
                     }
+                },
+            }
+        ),
+        // store without truncation
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto* storeInst     = llvm::dyn_cast<llvm::StoreInst>(&*irb.GetInsertPoint());
+
+                // even though we have no truncation here, if its a constant it might still be < 64 bit, so we need to convert it
+                auto* storeValue    = storeInst->getValueOperand();
+                if(auto* constInt = llvm::dyn_cast_if_present<llvm::ConstantInt>(storeValue)){
+                    storeValue = irb.getInt64(constInt->getZExtValue());
                 }
-            ),
 
-            // ptr to int 
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = &*irb.GetInsertPoint();
-                    return irb.CreateCall(instructionFunctions["ARM_mov"], {OP_N_MAT(instr,0)}); // in reality, it would just be deleted
-                },
-                llvm::Instruction::PtrToInt,
-                {}
-            ),
-
-
-            // control flow/branches
-            // conditional branches always have an icmp NE as their condition, if we match them before the unconditional ones, the plain Br match without children always matches only unconditional ones
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr      = &*irb.GetInsertPoint();
-                    auto cond       = OP_N_MAT(instr,0);
-                    auto innerCond  =
-                        llvm::dyn_cast<llvm::ICmpInst>(
-                            llvm::dyn_cast<llvm::ZExtInst>(
-                                llvm::dyn_cast<llvm::ICmpInst>(cond)->getOperand(0))->getOperand(0));
-                    auto pred       = innerCond->getPredicate();
-                    auto predStr    = llvm::ICmpInst::getPredicateName(pred);
-
-                    // get llvm string literal which displayes predStr
-                    auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
-
-                    auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
-                    auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
-
-                    auto cmp = irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(innerCond,0), OP_N_MAT(innerCond,1)});
-                    auto call = irb.CreateCall(instructionFunctions["ARM_b_cond"], {cmp, predStrLiteral});
-                    // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                    irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
-                    return call;
-                },
-                llvm::Instruction::Br, // conditional branch after 'normal' comparison
-                {
-                    {
-                        llvm::Instruction::ICmp, 
-                        {
-                            {
-                                llvm::Instruction::ZExt,
-                                {
-                                    llvm::Instruction::ICmp
-                                }
-                            },
-                            {}
-                        }
-                    },
-                    {},
-                    {},
-                }
-            ),
-            // icmp before conditional branch
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr      = &*irb.GetInsertPoint();
-                    auto cond       = llvm::dyn_cast<llvm::ICmpInst>(OP_N(instr,0));
-                    auto condInner  = OP_N_MAT(cond,0);
-                    auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
-                    auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
-
-                    auto call = irb.CreateCall(instructionFunctions["ARM_b_cbnz"], {condInner});
-                    // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                    irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
-                    return call;
-                },
-                llvm::Instruction::Br,
-                {
-                    {llvm::Instruction::ICmp}, // no requirements, because it can only be NE
-                    {},
-                    {},
-                }
-            ),
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto instr = dyn_cast<llvm::BranchInst>(&*irb.GetInsertPoint());
-                    auto call = irb.CreateCall(instructionFunctions["ARM_b"], {OP_N(instr,0)});
-                    // cannot be conditional branch, because that always has an icmp NE as its condition
-                    // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                    //irb.CreateBr(instr->getSuccessor(0)); // TODO this could make problems with use checking before deletion...
-                    return call;
-                },
-                llvm::Instruction::Br, 
+                auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(storeInst->getPointerOperand());
+                auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
+                // without truncaton -> no bitwidth check necessary
+                return irb.CreateCall(instructionFunctions["ARM_str"], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr, 0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 for multiplying by 8
+            },
+            llvm::Instruction::Store,
+            { 
+                // store arg is cast to the target type, so truncated, or target is already i64. This case handles non-truncation i.e. arbitrary first (value) arg
                 {},
-                true
-            ),
-
-            // icmp (also almost all possible ZExts, they're (almost) exclusively used for icmps, only once for a phi in the short circuiting logical ops)
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto* zextInstr = llvm::dyn_cast<llvm::ZExtInst>(&*irb.GetInsertPoint());
-                    auto* icmpInstr = llvm::dyn_cast<llvm::ICmpInst>(OP_N(zextInstr, 0));
-
-                    auto pred       = icmpInstr->getPredicate();
-                    auto predStr    = llvm::ICmpInst::getPredicateName(pred);
-
-                    // get llvm string literal which displayes predStr
-                    auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
-
-                    irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
-
-                    return irb.CreateCall(instructionFunctions["ARM_csel"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral}); // TODO args
-                },
-                llvm::Instruction::ZExt,
                 {
-                    {llvm::Instruction::ICmp}
+                    llvm::Instruction::GetElementPtr,
+                    {
+                        {
+                            llvm::Instruction::IntToPtr
+                        },
+                        {} // index
+                    }
+                },
+            }
+        ),
+
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                return irb.CreateCall(instructionFunctions["ARM_ldr"], {OP_N_MAT(instr,0)});
+            },
+            llvm::Instruction::Load,
+            {}
+        ),
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                return irb.CreateCall(instructionFunctions["ARM_str"], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
+            },
+            llvm::Instruction::Store,
+            {}
+        ),
+
+        // subscript with addrof
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                // add instruction for address calculation
+                auto* ptrToInt = llvm::dyn_cast<llvm::PtrToIntInst>(irb.GetInsertPoint());
+                auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrToInt->getPointerOperand());
+                auto* intToPtr = llvm::dyn_cast<llvm::IntToPtrInst>(gep->getOperand(0));
+
+                unsigned shiftInt = 0;
+                switch(gep->getSourceElementType()->getIntegerBitWidth()){
+                    case 8: shiftInt = 0; break;
+                    case 16: shiftInt = 1; break;
+                    case 32: shiftInt = 2; break;
+                    case 64: shiftInt = 3; break;
+                    default:
+                        //TODO error
+                        exit(1);
                 }
-            ),
-            // raw icmp without ZExt
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto* icmpInstr = llvm::dyn_cast<llvm::ICmpInst>(&*irb.GetInsertPoint());
 
-                    auto pred       = icmpInstr->getPredicate();
-                    auto predStr    = llvm::ICmpInst::getPredicateName(pred);
-
-                    // get llvm string literal which displayes predStr
-                    auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
-
-                    irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
-
-                    return irb.CreateCall(instructionFunctions["ARM_csel_i1"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral});
-                },
-                llvm::Instruction::ICmp,
-                {}
-            ),
-
-            // TODO test
-            // ZExt/PHI: only matched in order to match something for this ZExt, it will become a register later anyway
-            Pattern::make_root(
-                [](llvm::IRBuilder<>& irb){
-                    auto* zextInstr = llvm::dyn_cast<llvm::ZExtInst>(&*irb.GetInsertPoint());
-                    auto* phiInstr = llvm::dyn_cast<llvm::PHINode>(OP_N(zextInstr, 0)); // noDelete = true -> we can use this as is
-
-
-                    return irb.CreateCall(instructionFunctions["ZExt_handled_in_Reg_Alloc"], {phiInstr});
-                },
-                llvm::Instruction::ZExt,
+                auto indexOp = OP_N(gep, 1);
+                DEBUGLOG("indexOp: " << *indexOp);
+                llvm::ConstantInt* indexConst;
+                // TODO is there any problem with the constant not being deleted?
+                if((indexConst = llvm::dyn_cast_or_null<llvm::ConstantInt>(indexOp))!= nullptr){
+                    auto index = indexConst->getSExtValue();
+                    return irb.CreateCall(instructionFunctions["ARM_add"], {OP_N_MAT(intToPtr,0), irb.getInt64(index << shiftInt)});
+                } else {
+                    return irb.CreateCall(instructionFunctions["ARM_add_SHIFT"], {OP_N_MAT(intToPtr, 0), indexOp, irb.getInt64(shiftInt)});
+                }
+            },
+            llvm::Instruction::PtrToInt,
+            {
                 {
-                    {llvm::Instruction::PHI, {}, true}
+                    llvm::Instruction::GetElementPtr,
+                    {
+                        {
+                            llvm::Instruction::IntToPtr
+                        },
+                        {} // index operand can be arbitrary
+                    }
                 }
-            ),
+            }
+        ),
 
-            // TODO ZExt for short circuiting
-        };
+        // ptr to int 
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                return irb.CreateCall(instructionFunctions["ARM_mov_ptr"], {OP_N_MAT(instr,0)}); // in reality, it would just be deleted
+            },
+            llvm::Instruction::PtrToInt,
+            {}
+        ),
+
+
+        // control flow/branches
+        // conditional branches always have an icmp NE as their condition, if we match them before the unconditional ones, the plain Br match without children always matches only unconditional ones
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr      = &*irb.GetInsertPoint();
+                auto cond       = OP_N_MAT(instr,0);
+                auto innerCond  =
+                    llvm::dyn_cast<llvm::ICmpInst>(
+                        llvm::dyn_cast<llvm::ZExtInst>(
+                            llvm::dyn_cast<llvm::ICmpInst>(cond)->getOperand(0))->getOperand(0));
+                auto pred       = innerCond->getPredicate();
+                auto predStr    = llvm::ICmpInst::getPredicateName(pred);
+
+                // get llvm string literal which displayes predStr
+                auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
+
+                auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
+                auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
+
+                auto cmp = irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(innerCond,0), OP_N_MAT(innerCond,1)});
+                auto call = irb.CreateCall(instructionFunctions["ARM_b_cond"], {cmp, predStrLiteral});
+                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
+                return call;
+            },
+            llvm::Instruction::Br, // conditional branch after 'normal' comparison
+            {
+                {
+                    llvm::Instruction::ICmp, 
+                    {
+                        {
+                            llvm::Instruction::ZExt,
+                            {
+                                llvm::Instruction::ICmp
+                            }
+                        },
+                        {}
+                    }
+                },
+                {},
+                {},
+            }
+        ),
+        // icmp before conditional branch
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr      = &*irb.GetInsertPoint();
+                auto cond       = llvm::dyn_cast<llvm::ICmpInst>(OP_N(instr,0));
+                auto condInner  = OP_N_MAT(cond,0);
+                auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
+                auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
+
+                auto call = irb.CreateCall(instructionFunctions["ARM_b_cbnz"], {condInner});
+                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
+                return call;
+            },
+            llvm::Instruction::Br,
+            {
+                {llvm::Instruction::ICmp}, // no requirements, because it can only be NE
+                {},
+                {},
+            }
+        ),
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = dyn_cast<llvm::BranchInst>(&*irb.GetInsertPoint());
+                auto call = irb.CreateCall(instructionFunctions["ARM_b"], {OP_N(instr,0)});
+                // cannot be conditional branch, because that always has an icmp NE as its condition
+                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                //irb.CreateBr(instr->getSuccessor(0)); // TODO this could make problems with use checking before deletion...
+                return call;
+            },
+            llvm::Instruction::Br, 
+            {},
+            true
+        ),
+
+        // icmp (also almost all possible ZExts, they're (almost) exclusively used for icmps, only once for a phi in the short circuiting logical ops)
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto* zextInstr = llvm::dyn_cast<llvm::ZExtInst>(&*irb.GetInsertPoint());
+                auto* icmpInstr = llvm::dyn_cast<llvm::ICmpInst>(OP_N(zextInstr, 0));
+
+                auto pred       = icmpInstr->getPredicate();
+                auto predStr    = llvm::ICmpInst::getPredicateName(pred);
+
+                // get llvm string literal which displayes predStr
+                auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
+
+                irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
+
+                return irb.CreateCall(instructionFunctions["ARM_csel"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral}); // TODO args
+            },
+            llvm::Instruction::ZExt,
+            {
+                {llvm::Instruction::ICmp}
+            }
+        ),
+        // raw icmp without ZExt
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto* icmpInstr = llvm::dyn_cast<llvm::ICmpInst>(&*irb.GetInsertPoint());
+
+                auto pred       = icmpInstr->getPredicate();
+                auto predStr    = llvm::ICmpInst::getPredicateName(pred);
+
+                // get llvm string literal which displayes predStr
+                auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
+
+                irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
+
+                return irb.CreateCall(instructionFunctions["ARM_csel_i1"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral});
+            },
+            llvm::Instruction::ICmp,
+            {}
+        ),
+
+        // ZExt/PHI: only matched in order to match something for this ZExt, it will become a register later anyway
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto* zextInstr = llvm::dyn_cast<llvm::ZExtInst>(&*irb.GetInsertPoint());
+                auto* phiInstr = llvm::dyn_cast<llvm::PHINode>(OP_N(zextInstr, 0)); // noDelete = true -> we can use this as is
+
+
+                return irb.CreateCall(instructionFunctions["ZExt_handled_in_Reg_Alloc"], {phiInstr});
+            },
+            llvm::Instruction::ZExt,
+            {
+                {llvm::Instruction::PHI, {}, true}
+            }
+        ),
+    };
+
+    void doISel(llvm::raw_ostream& out){
+        initInstructionFunctions();
 
         // TODO sort by size descending
         //std::sort(patterns.begin(), patterns.end(), [](auto& a, auto& b){
@@ -2996,7 +2994,7 @@ cont:
             }
         }
 
-        moduleUP->print(llvm::outs(), nullptr);
+        moduleUP->print(out, nullptr);
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
         if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
     }
@@ -3005,6 +3003,11 @@ cont:
 
 int main(int argc, char *argv[])
 {
+#define MEASURE_TIME_START(point) auto point ## _start = std::chrono::high_resolution_clock::now()
+
+#define MEASURE_TIME_END(point) auto point ## _end = std::chrono::high_resolution_clock::now()
+
+#define MEASURED_TIME_AS_SECONDS(point, iterations) std::chrono::duration_cast<std::chrono::duration<double>>(point ## _end - point ## _start).count()/(static_cast<double>(iterations))
     try{
         auto parsedArgs = ArgParse::parse(argc, argv);
 
@@ -3038,30 +3041,33 @@ int main(int argc, char *argv[])
 
         Parser parser{inputFile};
 
-        auto parseStart = std::chrono::high_resolution_clock::now();
+        MEASURE_TIME_START(parse);
         unique_ptr<AST> ast;
         for(int i = 0; i<iterations; i++){
             ast = parser.parse();
             parser.resetTokenizer();
         }
-        auto parseEnd = std::chrono::high_resolution_clock::now();
+        MEASURE_TIME_END(parse);
 
         if(parsedArgs.contains(ArgParse::possible.preprocess)) system("rm /tmp/*.bpreprocessed");
 
-        auto semanalyzeStart = std::chrono::high_resolution_clock::now();
+        MEASURE_TIME_START(semanalyze);
         if(!parsedArgs.contains(ArgParse::possible.nosemantic)){
             for(int i = 0; i<iterations; i++){
                 SemanticAnalysis::reset();
                 SemanticAnalysis::analyze(*ast);
             }
         }
-        auto semanalyzeEnd = std::chrono::high_resolution_clock::now();
+        MEASURE_TIME_END(semanalyze);
 
         if(parser.failed || SemanticAnalysis::failed){
             return EXIT_FAILURE;
         }
 
         bool genSuccess = false;
+
+        double codegenSeconds{0.0};
+        double iselSeconds{0.0};
 
         if(parsedArgs.contains(ArgParse::possible.print) || parsedArgs.contains(ArgParse::possible.dot)){
             if(parsedArgs.contains(ArgParse::possible.url)){
@@ -3085,23 +3091,41 @@ int main(int argc, char *argv[])
             if(parsedArgs.contains(ArgParse::possible.output)){
                 std::error_code errorCode;
                 llvm::raw_fd_ostream outputFile{parsedArgs.at(ArgParse::possible.output), errorCode};
+                MEASURE_TIME_START(codegen);
                 if(!(genSuccess = Codegen::generate(*ast, outputFile))){
                     llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
                 }
+                MEASURE_TIME_END(codegen);
+                codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
+                if(parsedArgs.contains(ArgParse::possible.isel)){
+                    MEASURE_TIME_START(isel);
+                    Codegen::ISel::doISel(outputFile);
+                    MEASURE_TIME_END(isel);
+                    iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
+                }
                 outputFile.close();
             }else{
+                MEASURE_TIME_START(codegen);
                 if(!(genSuccess = Codegen::generate(*ast, llvm::outs()))){
                     llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
                 }
-                // TODO call ISel
-                Codegen::ISel::test();
+                MEASURE_TIME_END(codegen);
+                codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
+                if(parsedArgs.contains(ArgParse::possible.isel)){
+                    MEASURE_TIME_START(isel);
+                    Codegen::ISel::doISel(llvm::outs());
+                    MEASURE_TIME_END(isel);
+                    iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
+                }
             }
         }
         //print execution times
         if(parsedArgs.contains(ArgParse::possible.benchmark)){
-            std::cout << "Average parse time (over "              << iterations << " iterations): " << (1e-9*std::chrono::duration_cast<std::chrono::nanoseconds>(parseEnd - parseStart).count())/((double)iterations)           << "s"  << std::endl;
-            std::cout << "Average semantic analysis time: (over " << iterations << " iterations): " << (1e-9*std::chrono::duration_cast<std::chrono::nanoseconds>(semanalyzeEnd - semanalyzeStart).count())/((double)iterations) << "s"  << std::endl;
-            std::cout << "Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                                                                                                       << "MB" << std::endl;
+            std::cout << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s"  << std::endl;
+            std::cout << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s"  << std::endl;
+            std::cout << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s"  << std::endl;
+            std::cout << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s"  << std::endl;
+            std::cout << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB" << std::endl;
         }
         if(!genSuccess) return EXIT_FAILURE;
     }catch(std::exception& e){

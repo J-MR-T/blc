@@ -1546,7 +1546,6 @@ namespace Codegen{
                                 // get the ptr to the alloca then cast that to an int, because everything (except the auto vars stored in the varmap) is an i64
                                 if(operandNode.type == ASTNode::Type::NExprVar){
                                     auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode);
-                                    // TODO this is wrong, addrof is also possible on subscripts
                                     return irb.CreatePtrToInt(ptr, i64);
                                 }else{ /* has to be a subscript in this case, because of the SemanticAnalysis constarints */
                                     // REFACTOR: would be nice to merge this with the code for loading from subscripts at some point, its almost the same
@@ -2081,18 +2080,6 @@ namespace Codegen::ISel{
 
     unsigned currentFunctionBytesToFreeAtEnd{0};
 
-    // TODO probably delete
-    //template<typename T>
-    //consteval std::vector<llvm::Value*> patternsMatchingType(std::vector<llvm::Value*> patterns [> this will be a list of patterns which in turn contain root values, but this is easier for now<]){
-    //    for(auto it = patterns.begin(); it!= patterns.end(); ){
-    //        auto pattern = *(it++);
-    //        if(!llvm::isa<T>(pattern)){
-    //            it = patterns.erase(it);
-    //        }
-    //    }
-    //    return patterns;
-    //}
-
     // test, for the pattern matching
     struct Pattern{
     public:
@@ -2159,9 +2146,9 @@ namespace Codegen::ISel{
 
             // remove all operands of the instruction from the program
             std::queue<llvm::Instruction*> toRemove{};
-            std::queue<const Pattern*> patternQueue{}; // TODO validate the pattern queue thing
+            std::queue<const Pattern*> patternQueue{};
             PUSH_OPS(instr, this);
-            while(!toRemove.empty()){ // TODO i can already see this making problems with the circularly referent PHIs
+            while(!toRemove.empty()){
                 instr = toRemove.front();
                 toRemove.pop();
 
@@ -2171,7 +2158,7 @@ namespace Codegen::ISel{
                 DEBUGLOG("removing " << *instr);
 #ifndef NDEBUG
                 // normally it should only have one use. But because we also use it in the replacement call, it has two uses, so error on >=3
-                if(instr->hasNUsesOrMore(3)){ // TODO Uses() or Users() ?? Uses, right?
+                if(instr->hasNUsesOrMore(3)){
                     llvm::errs() << "Critical: Instruction has more than one use, cannot be removed, pattern matching severly wrong, instr: " << *instr << ", num uses: " << instr->getNumUses() << "\n";
                     // print users:
                     for(auto user: instr->users()){
@@ -2194,7 +2181,7 @@ namespace Codegen::ISel{
         }
 
     private:
-        // TODO it might be worth having an alternative std::function for matching, which simply gets the llvm value as an argument and returns true if it matches,
+        // REFACTOR it might be worth having an alternative std::function for matching, which simply gets the llvm value as an argument and returns true if it matches,
         // this would allow for arbitrary matching
 
         unsigned calcTotalSize(std::vector<Pattern> children) const noexcept {
@@ -2231,14 +2218,6 @@ namespace Codegen::ISel{
             return rootPattern;
         }
 
-        // TODO delete
-        // example replacementCall function
-        //[](llvm::IRBuilder<>& irb){
-        //    // TODO this part changes for every pattern, do that
-        //    // TODO add args
-        //    return irb.CreateCall(llvm::Function::Create(llvm::FunctionType::get(i64, true), llvm::GlobalValue::ExternalLinkage, "STR", moduleUP.get()), {});
-        //};
-
         /**
          * The matching works thusly:
          * - if there are alternatives, to this pattern, the pattern matches iff any of the alternatives match
@@ -2252,9 +2231,8 @@ namespace Codegen::ISel{
          * This basically boils down to tree matching with edge splitting on DAGs (any instruction except the root and those which are ignored, because they are empty require exactly one predecessor to match), with the DAG being the basic blocks of an llvm function
          */
         bool match(llvm::Value* val) const {
-            if(type!=0 && !root && val->hasNUsesOrMore(2)) return false; // TODO check again. This requirement is important for all 'real' inner nodes, i.e. all except the root and leaves
+            if(type!=0 && !root && val->hasNUsesOrMore(2)) return false; // this requirement is important for all 'real' inner nodes, i.e. all except the root and leaves
                                                            // leaves should have type 0
-                                                           // TODO hasOneUse() vs hasOneUser()
 
             // constant check
             if(constant){
@@ -2286,7 +2264,7 @@ namespace Codegen::ISel{
         llvm::Instruction::PHI,
     };
 
-    /// for useful matching the patterns need to be sorted by totalSize (descending) here -> TODO: do this at compile time wherever the patterns are stored
+    /// for useful matching the patterns need to be sorted by totalSize (descending) here. For this simple isel, this is just done by hand
     std::unordered_map<llvm::Instruction*, const Pattern&> matchPatterns(llvm::Function* func, const std::vector<Pattern>& patterns){
         std::unordered_map<llvm::Instruction*, const Pattern&> matches{};
         std::unordered_set<llvm::Instruction*> covered{};
@@ -2304,7 +2282,6 @@ namespace Codegen::ISel{
                 for(auto& pattern:patterns){
                     if(pattern.match(&instr)){
                         matches.emplace(&instr, pattern);
-                        // TODO this definitely would mess up the iterator, we need to somehow remove them afterwards, and skip them while iterating
                         /*
                           the following code boils down to:
 
@@ -2314,18 +2291,14 @@ namespace Codegen::ISel{
                                   addCovered(covered, pattern, child);
                               }
                           }
-
                         */
 
-                        std::queue<const Pattern*> patternQueue{}; // TODO validate the pattern queue thing
+                        std::queue<const Pattern*> patternQueue{};
                         patternQueue.push(&pattern);
 
-                        // TODO same problem as above in the instruction deletion: this just uses all operands and does not stop at the children of the pattern
                         std::queue<llvm::Instruction*> coveredInsertionQueue{}; // lets not do this recursively...
                         coveredInsertionQueue.push(&instr);
                         while(!coveredInsertionQueue.empty()){
-                            // TODO i can already see this making problems with the circularly referent PHIs
-
                             auto current = coveredInsertionQueue.front();
                             auto currentPattern = patternQueue.front();
                             coveredInsertionQueue.pop();
@@ -2404,7 +2377,7 @@ cont:
             CREATE_INST_FN("ARM_msub",      i64,                            i64,  i64,                               i64),
             CREATE_INST_FN("ARM_sdiv",      i64,                            i64,  i64),
 
-            // TODO take care of cmp things, try to merge flag setting with flag consuming, but I don't think this is universally possible
+            // cmp
             CREATE_INST_FN("ARM_cmp",      i64, i64, i64),
             CREATE_INST_FN_VARARGS("ARM_csel",       i64), // condition is represented as string, so use varargs
             CREATE_INST_FN_VARARGS("ARM_csel_i1",    llvm::Type::getInt1Ty(ctx)), // condition is represented as string, so use varargs
@@ -2727,8 +2700,8 @@ cont:
                     case 32:
                         return irb.CreateCall(instructionFunctions["ARM_ldr_sw"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
                     default: // on 64, the sext is not created by llvm:
-                        // TODO some error
-                        exit(1);
+                        llvm::errs() << "Fatal pattern matching error during ISel: sext of load with bitwidth " << bitwidthOfLoad << " not supported\n";
+                        exit(EXIT_FAILURE);
                 }
             },
             llvm::Instruction::SExt,
@@ -2791,8 +2764,8 @@ cont:
                     case 32:
                         return irb.CreateCall(instructionFunctions["ARM_str32"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
                     default: // on 64, the trunc is not created by llvm:
-                        // TODO some error
-                        exit(1);
+                        llvm::errs() << "Fatal pattern matching error during ISel: trunc of store with bitwidth " << bitwidthOfStore << " not supported\n";
+                        exit(EXIT_FAILURE);
                 }
             },
             llvm::Instruction::Store,
@@ -2870,14 +2843,15 @@ cont:
                 auto* intToPtr = llvm::dyn_cast<llvm::IntToPtrInst>(gep->getOperand(0));
 
                 unsigned shiftInt = 0;
-                switch(gep->getSourceElementType()->getIntegerBitWidth()){
+                int bitwidth = gep->getSourceElementType()->getIntegerBitWidth();
+                switch(bitwidth){
                     case 8: shiftInt = 0; break;
                     case 16: shiftInt = 1; break;
                     case 32: shiftInt = 2; break;
                     case 64: shiftInt = 3; break;
                     default:
-                        //TODO error
-                        exit(1);
+                        llvm::errs() << "Fatal pattern matching error during ISel: subscript with bitwidth " << bitwidth << " not supported\n";
+                        exit(EXIT_FAILURE);
                 }
 
                 auto indexOp = OP_N(gep, 1);
@@ -2937,7 +2911,7 @@ cont:
                 auto cmp = irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(innerCond,0), OP_N_MAT(innerCond,1)});
                 auto call = irb.CreateCall(instructionFunctions["ARM_b_cond"], {cmp, predStrLiteral});
                 // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
+                irb.CreateCondBr(call, trueBlock, falseBlock);
                 return call;
             },
             llvm::Instruction::Br, // conditional branch after 'normal' comparison
@@ -2969,7 +2943,7 @@ cont:
 
                 auto call = irb.CreateCall(instructionFunctions["ARM_b_cbnz"], {condInner});
                 // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                irb.CreateCondBr(call, trueBlock, falseBlock); // TODO this could make problems with use checking before deletion...
+                irb.CreateCondBr(call, trueBlock, falseBlock);
                 return call;
             },
             llvm::Instruction::Br,
@@ -2982,11 +2956,8 @@ cont:
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = dyn_cast<llvm::BranchInst>(&*irb.GetInsertPoint());
-                auto call = irb.CreateCall(instructionFunctions["ARM_b"], {OP_N(instr,0)});
-                // cannot be conditional branch, because that always has an icmp NE as its condition
-                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                //irb.CreateBr(instr->getSuccessor(0)); // TODO this could make problems with use checking before deletion...
-                return call;
+                // cannot be conditional branch, because that always has an icmp NE as its condition, thats matched before
+                return irb.CreateCall(instructionFunctions["ARM_b"], {OP_N(instr,0)});
             },
             llvm::Instruction::Br, 
             {},
@@ -3007,7 +2978,7 @@ cont:
 
                 irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
 
-                return irb.CreateCall(instructionFunctions["ARM_csel"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral}); // TODO args
+                return irb.CreateCall(instructionFunctions["ARM_csel"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral});
             },
             llvm::Instruction::ZExt,
             {
@@ -3051,12 +3022,6 @@ cont:
 
     void doISel(llvm::raw_ostream& out){
         initInstructionFunctions();
-
-        // TODO sort by size descending
-        //std::sort(patterns.begin(), patterns.end(), [](auto& a, auto& b){
-        //    return a.totalSize > b.totalSize;
-        //});
-
 
         for(auto& fn : moduleUP->functions()){
             if(fn.isDeclaration()) continue;

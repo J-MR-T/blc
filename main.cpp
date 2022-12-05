@@ -2028,10 +2028,11 @@ namespace Codegen{
 /*
  ------------------------------------------------------------------------------------------------------
  HW 6 START
- Exceptions:
+
+ Please see samples/ directory for some examples of low level optimizations implemented :)
  ------------------------------------------------------------------------------------------------------
  Subset of LLVM IR used (checks/not checks: done/not done):
- -     Format: <instr>  [<operand type(s)>]
+ - Format: <instr>  [<operand type(s)>]
  - [x] Alloca           [i64]
  - [x] Load             [ptr]
  - [x] Store            [i64, ptr]
@@ -2054,7 +2055,7 @@ namespace Codegen{
  - [x] AShr             [i64]
  - [x] GetElementPtr    [ptr, i64]
  - [x] Br (cond/uncond) [i1]
- - [ ] Poison Values    [i64/ptr]
+ - [x] Poison Values    [i64/ptr] (don't need special handling)
 
  Not relevant for this task, but used:
  - Call             [return: i64, args: i64...]
@@ -2063,14 +2064,7 @@ namespace Codegen{
  - Unreachable
 
  ----------------------------------------------------
- ARM (v8-A) subset used:
- Control Flow:
-      - Conditional Branches: CBNZ, CBZ (branch if not zero, branch if zero)
-      - Unconditional Branches: B (immediate), BR (Branch to register), RET (return from subroutine)
- Load/Store:
-      - Load: LDR (load register)
-      - Store: STR (store register)
-
+ ARM (v8-A) subset used: See instructionFunctions
 
  ----------------------------------------------------
  useful stuff im putting somewhere
@@ -2539,7 +2533,7 @@ cont:
             }
         ),
 
-#define TWO_OPERAND_INSTR_PATTERN(llvmInstr, armInstr)                                                               \
+#define TWO_OPERAND_INSTR_PATTERN(llvmInstr, armInstr)                                                           \
         Pattern::make_root(                                                                                      \
             [](llvm::IRBuilder<>& irb){                                                                          \
                 auto instr = &*irb.GetInsertPoint();                                                             \
@@ -2549,10 +2543,101 @@ cont:
             {}                                                                                                   \
         ),
 
+        // shifted add/sub
+        // both add variants:
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                auto addOp1 = OP_N_MAT(instr,0);
+                auto* shift = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
+                auto shiftOp1 = OP_N_MAT(shift,0);
+                auto shiftOp2 = OP_N(shift,1); // this has to be an immediate
+                auto fn = instructionFunctions["ARM_add_SHIFT"];
+                return irb.CreateCall(fn, {addOp1, shiftOp1, shiftOp2});
+            },
+            llvm::Instruction::Add,
+            {
+                {},
+                {
+                    llvm::Instruction::Shl,
+                    {
+                        {},
+                        {Pattern::make_constant()}
+                    }
+                },
+            }
+        ),
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                auto addOp2 = OP_N_MAT(instr,1);
+                auto* shift = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,0));
+                auto shiftOp1 = OP_N_MAT(shift,0);
+                auto shiftOp2 = OP_N(shift,1); // this has to be an immediate
+                auto fn = instructionFunctions["ARM_add_SHIFT"];
+                return irb.CreateCall(fn, {addOp2, shiftOp1, shiftOp2});
+            },
+            llvm::Instruction::Add,
+            {
+                {
+                    llvm::Instruction::Shl,
+                    {
+                        {},
+                        {Pattern::make_constant()}
+                    }
+                },
+                {},
+            }
+        ),
+        // sub:
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                auto subOp1 = OP_N_MAT(instr,0);
+                auto* shift = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
+                auto shiftOp1 = OP_N_MAT(shift,0);
+                auto shiftOp2 = OP_N(shift,1); // this has to be an immediate
+                auto fn = instructionFunctions["ARM_sub_SHIFT"];
+                return irb.CreateCall(fn, {subOp1, shiftOp1, shiftOp2});
+            },
+            llvm::Instruction::Sub,
+            {
+                {},
+                {
+                    llvm::Instruction::Shl,
+                    {
+                        {},
+                        {Pattern::make_constant()}
+                    }
+                },
+            }
+        ),
 
-        // add, sub, mul, div
-        TWO_OPERAND_INSTR_PATTERN(Add, "ARM_add") // TODO their second operand can be an immediate, handle that
-        TWO_OPERAND_INSTR_PATTERN(Sub, "ARM_sub") 
+        // add, sub (don't need to materialize immediate operands for the second one, they accept them)
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                auto op1 = OP_N(instr,0);
+                auto op2 = OP_N(instr,1);
+                if(llvm::isa<llvm::ConstantInt>(op1)){
+                    std::swap(op1, op2);
+                }
+
+                return irb.CreateCall(instructionFunctions["ARM_add"], {MAYBE_MAT_CONST(op1), op2});
+            },
+            llvm::Instruction::Add,
+            {}
+        ),
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb){
+                auto instr = &*irb.GetInsertPoint();
+                return irb.CreateCall(instructionFunctions["ARM_sub"], {OP_N_MAT(instr,0), OP_N(instr,1)});
+            },
+            llvm::Instruction::Sub,
+            {}
+        ),
+
+        // mul, div
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
@@ -2798,7 +2883,6 @@ cont:
                 auto indexOp = OP_N(gep, 1);
                 DEBUGLOG("indexOp: " << *indexOp);
                 llvm::ConstantInt* indexConst;
-                // TODO is there any problem with the constant not being deleted?
                 if((indexConst = llvm::dyn_cast_or_null<llvm::ConstantInt>(indexOp))!= nullptr){
                     auto index = indexConst->getSExtValue();
                     return irb.CreateCall(instructionFunctions["ARM_add"], {OP_N_MAT(intToPtr,0), irb.getInt64(index << shiftInt)});

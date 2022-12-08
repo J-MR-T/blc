@@ -42,6 +42,7 @@ using std::unique_ptr;
 
 
 // search for "HW 6" to find the start of the new code
+// TODO
 
 
 struct Token{
@@ -259,7 +260,7 @@ class UnexpectedTokenException :  public ParsingException {
 #define RET(type) peeked = Token{type}; return peeked;
 #define RET_NAME(type,name) peeked = Token{type, name}; return peeked;
         if(peeked == emptyToken){
-            if(progI>=prog.size()){
+            if(progI == string::npos || progI>=prog.size()){
                 //return EOP token
                 RET(Token::Type::EOP);
             }
@@ -267,7 +268,7 @@ class UnexpectedTokenException :  public ParsingException {
             // skip whitespace & comments 
             while(true){
                 progI=prog.find_first_not_of(" \f\n\r\t\v", progI); // same chars as isspace uses
-                if(progI>=prog.size()){
+                if(progI == string::npos || progI>=prog.size()){
                     RET(Token::Type::EOP);
                 }
 
@@ -455,7 +456,11 @@ class UnexpectedTokenException :  public ParsingException {
     }
 
     std::uint64_t getLineNum(){
-        //this should work on windows too, because '\r\n' also contains '\n', but honestly if windows users have wrong line numbers in their errors, so be it :P
+        if(progI == string::npos){
+            return std::count(prog.begin(), prog.end(), '\n') +1;
+        }
+        // this should work on windows too, because '\r\n' also contains '\n', but honestly if windows users have wrong line numbers in their errors, so be it :P
+        // TODO segfault
         return std::count(prog.begin(), prog.begin()+progI, '\n')+1;
     }
 

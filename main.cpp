@@ -1543,7 +1543,7 @@ namespace Codegen{
                             return irb.CreateNeg(genExpr(operandNode, irb)); // creates a sub with 0 as first op
                         case Token::Type::LOGICAL_NOT:
                             {
-                                auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_NE, genExpr(operandNode, irb), irb.getInt64(0));
+                                auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_EQ, genExpr(operandNode, irb), irb.getInt64(0));
                                 return irb.CreateZExt(cmp, i64);
                             }
                         case Token::Type::AMPERSAND:
@@ -2344,85 +2344,132 @@ cont:
     }
 
 
+    // not an enum class for readability, all instructions are prefixed with ARM_ anyway
+    enum ARMInstruction{
+        ARM_add,
+        ARM_add_SP,
+        ARM_add_SHIFT,
+        ARM_sub,
+        ARM_sub_SP,
+        ARM_sub_SHIFT,
+        ARM_madd,
+        ARM_msub,
+        ARM_sdiv,
+
+        ARM_cmp,
+        ARM_csel,
+        ARM_csel_i1,
+
+        ARM_lsl_imm,
+        ARM_lsl_var,
+        ARM_asr_imm,
+        ARM_asr_var,
+
+        ARM_and,
+        ARM_orr,
+        ARM_eor,
+
+        ARM_mov,
+        ARM_mov_ptr,
+        ARM_mov_shift,
+
+        ARM_ldr,
+        ARM_ldr_sb,
+        ARM_ldr_sh,
+        ARM_ldr_sw,
+        ARM_str,
+        ARM_str32,
+        ARM_str32_b,
+        ARM_str32_h,
+
+        ARM_b_cond,
+        ARM_b,
+        ARM_b_cbnz,
+
+        ZExt_handled_in_Reg_Alloc,
+    };
+
+    /// functions to serve as substitute for actual ARM instructions
 #define CREATE_INST_FN(name, ret, ...)                          \
     {                                                           \
-        name,                                                   \
+        name,                                   \
         llvm::Function::Create(                                 \
             llvm::FunctionType::get(ret, {__VA_ARGS__}, false), \
             llvm::GlobalValue::ExternalLinkage,                 \
-            name,                                               \
+            #name,                                              \
             *moduleUP                                           \
         )                                                       \
     }
 
-#define CREATE_INST_FN_VARARGS(name, ret)                  \
-    {                                                           \
-        name,                                                   \
-        llvm::Function::Create(                                 \
+#define CREATE_INST_FN_VARARGS(name, ret)           \
+    {                                               \
+        name,                       \
+        llvm::Function::Create(                     \
             llvm::FunctionType::get(ret, {}, true), \
-            llvm::GlobalValue::ExternalLinkage,                 \
-            name,                                               \
-            *moduleUP                                           \
-        )                                                       \
+            llvm::GlobalValue::ExternalLinkage,     \
+            #name,                                  \
+            *moduleUP                               \
+        )                                           \
     }
 
-    /// functions to serve as substitute for actual ARM instructions
-    static std::unordered_map<string, llvm::Function*> instructionFunctions;
+    static std::unordered_map<ARMInstruction, llvm::Function*> instructionFunctions;
+			// REFACTOR: If I initialize this directly, llvm decides not to use opaque pointers for allocas for some reason. Don't ask me why
+static void initInstructionFunctions(){
+		instructionFunctions = {
+        CREATE_INST_FN(ARM_add,       i64,                            i64,  i64),
+        CREATE_INST_FN(ARM_add_SP,    voidTy,                         i64), // simulate add to stack pointer
+        CREATE_INST_FN(ARM_add_SHIFT, i64,                            i64,  i64,                               i64),
+        CREATE_INST_FN(ARM_sub,       i64,                            i64,  i64),
+        CREATE_INST_FN(ARM_sub_SP,    llvm::PointerType::get(ctx,0), i64), // simulate sub from stack pointer
+        CREATE_INST_FN(ARM_sub_SHIFT, i64,                            i64,  i64,                               i64),
+        CREATE_INST_FN(ARM_madd,      i64,                            i64,  i64,                               i64),
+        CREATE_INST_FN(ARM_msub,      i64,                            i64,  i64,                               i64),
+        CREATE_INST_FN(ARM_sdiv,      i64,                            i64,  i64),
 
-    static void initInstructionFunctions(){
-        // for some obscure reason, adding this in a static initializer stops the pattern matching from working
-        instructionFunctions = {
-            CREATE_INST_FN("ARM_add",       i64,                            i64,  i64),
-            CREATE_INST_FN("ARM_add_SP",    voidTy,                         i64), // simulate add to stack pointer
-            CREATE_INST_FN("ARM_add_SHIFT", i64,                            i64,  i64,                               i64),
-            CREATE_INST_FN("ARM_sub",       i64,                            i64,  i64),
-            CREATE_INST_FN("ARM_sub_SP",    llvm::Type::getInt64PtrTy(ctx), i64), // simulate sub from stack pointer
-            CREATE_INST_FN("ARM_sub_SHIFT", i64,                            i64,  i64,                               i64),
-            CREATE_INST_FN("ARM_madd",      i64,                            i64,  i64,                               i64),
-            CREATE_INST_FN("ARM_msub",      i64,                            i64,  i64,                               i64),
-            CREATE_INST_FN("ARM_sdiv",      i64,                            i64,  i64),
 
-            // cmp
-            CREATE_INST_FN("ARM_cmp",      i64, i64, i64),
-            CREATE_INST_FN_VARARGS("ARM_csel",       i64), // condition is represented as string, so use varargs
-            CREATE_INST_FN_VARARGS("ARM_csel_i1",    llvm::Type::getInt1Ty(ctx)), // condition is represented as string, so use varargs
+        // cmp
+        CREATE_INST_FN(ARM_cmp,      i64, i64, i64),
+        CREATE_INST_FN_VARARGS(ARM_csel,       i64), // condition is represented as string, so use varargs
+        CREATE_INST_FN_VARARGS(ARM_csel_i1,    llvm::Type::getInt1Ty(ctx)), // condition is represented as string, so use varargs
 
-            // shifts by variable and immediate amount
-            CREATE_INST_FN("ARM_lsl_imm",  i64,  i64, i64),
-            CREATE_INST_FN("ARM_lsl_var",  i64,  i64, i64),
-            CREATE_INST_FN("ARM_asr_imm",  i64,  i64, i64),
-            CREATE_INST_FN("ARM_asr_var",  i64,  i64, i64),
+        // shifts by variable and immediate amount
+        CREATE_INST_FN(ARM_lsl_imm,  i64,  i64, i64),
+        CREATE_INST_FN(ARM_lsl_var,  i64,  i64, i64),
+        CREATE_INST_FN(ARM_asr_imm,  i64,  i64, i64),
+        CREATE_INST_FN(ARM_asr_var,  i64,  i64, i64),
 
-            // bitwise
-            CREATE_INST_FN("ARM_and",      i64, i64, i64),
-            CREATE_INST_FN("ARM_orr",      i64, i64, i64),
-            CREATE_INST_FN("ARM_eor",      i64, i64, i64), // XOR
+        // bitwise
+        CREATE_INST_FN(ARM_and,      i64, i64, i64),
+        CREATE_INST_FN(ARM_orr,      i64, i64, i64),
+        CREATE_INST_FN(ARM_eor,      i64, i64, i64), // XOR
 
-            // mov
-            CREATE_INST_FN("ARM_mov",       i64, i64),
-            CREATE_INST_FN("ARM_mov_ptr",   i64, llvm::Type::getInt64PtrTy(ctx)),
-            CREATE_INST_FN("ARM_mov_shift", i64, i64,  i64),
+        // mov
+        CREATE_INST_FN(ARM_mov,       i64, i64),
+        CREATE_INST_FN(ARM_mov_ptr,   i64, llvm::PointerType::get(ctx,0)),
+        CREATE_INST_FN(ARM_mov_shift, i64, i64,  i64),
 
-            // memory access
-            // (with varargs to be able to simulate the different addressing modes)
-            CREATE_INST_FN_VARARGS("ARM_ldr",      i64),
-            CREATE_INST_FN_VARARGS("ARM_ldr_sb",   i64),
-            CREATE_INST_FN_VARARGS("ARM_ldr_sh",   i64),
-            CREATE_INST_FN_VARARGS("ARM_ldr_sw",   i64),
-            CREATE_INST_FN_VARARGS("ARM_str",      voidTy),
-            CREATE_INST_FN_VARARGS("ARM_str32",    voidTy),
-            CREATE_INST_FN_VARARGS("ARM_str32_b",  voidTy),
-            CREATE_INST_FN_VARARGS("ARM_str32_h",  voidTy),
+        // memory access
+        // (with varargs to be able to simulate the different addressing modes)
+        CREATE_INST_FN_VARARGS(ARM_ldr,      i64),
+        CREATE_INST_FN_VARARGS(ARM_ldr_sb,   i64),
+        CREATE_INST_FN_VARARGS(ARM_ldr_sh,   i64),
+        CREATE_INST_FN_VARARGS(ARM_ldr_sw,   i64),
+        CREATE_INST_FN_VARARGS(ARM_str,      voidTy),
+        CREATE_INST_FN_VARARGS(ARM_str32,    voidTy),
+        CREATE_INST_FN_VARARGS(ARM_str32_b,  voidTy),
+        CREATE_INST_FN_VARARGS(ARM_str32_h,  voidTy),
 
-            // control flow/branches
-            CREATE_INST_FN_VARARGS("ARM_b_cond", llvm::Type::getInt1Ty(ctx)),
-            CREATE_INST_FN_VARARGS("ARM_b",      voidTy),
-            CREATE_INST_FN("ARM_b_cbnz",         llvm::Type::getInt1Ty(ctx),  i64),
+        // control flow/branches
+        CREATE_INST_FN_VARARGS(ARM_b_cond, llvm::Type::getInt1Ty(ctx)),
+        CREATE_INST_FN_VARARGS(ARM_b,      voidTy),
+        CREATE_INST_FN(ARM_b_cbnz,         llvm::Type::getInt1Ty(ctx),  i64),
 
-            // 'metadata' calls
-            CREATE_INST_FN_VARARGS("ZExt_handled_in_Reg_Alloc", i64),
-        };
-    }
+        // 'metadata' calls
+        CREATE_INST_FN_VARARGS(ZExt_handled_in_Reg_Alloc, i64),
+		};
+    };
+
+
 
 #undef CREATE_INST_FN
 
@@ -2430,12 +2477,14 @@ cont:
     auto XZR = llvm::ConstantInt::get(i64, 0);
 
 
+/// check if the given value is a constant and, if so, materialize it
 #define MAYBE_MAT_CONST(value)                                                                           \
         (llvm::isa<llvm::ConstantInt>(value) && (!llvm::dyn_cast<llvm::ConstantInt>(value)->isZero())) ? \
-            irb.CreateCall(instructionFunctions["ARM_mov"], {value}) :                                   \
+            irb.CreateCall(instructionFunctions[ARM_mov], {value}) :                                   \
             (value)
 
-#define MAT_CONST(value) irb.CreateCall(instructionFunctions["ARM_mov"], {value})
+/// always inserts a mov to materialize the given constant
+#define MAT_CONST(value) irb.CreateCall(instructionFunctions[ARM_mov], {value})
             
 /// gets the nth operand of the instruction and materializes it if necessary
 #define OP_N_MAT(instr, N) \
@@ -2459,7 +2508,7 @@ cont:
 
                 auto addOp2 = OP_N_MAT(instr, 1);
 
-                auto fn = instructionFunctions["ARM_madd"];
+                auto fn = instructionFunctions[ARM_madd];
                 return irb.CreateCall(fn, {mulOp1, mulOp2, addOp2});
             },
             llvm::Instruction::Add,
@@ -2479,7 +2528,7 @@ cont:
 
                 auto addOp1 = OP_N_MAT(instr,0);
 
-                auto fn = instructionFunctions["ARM_madd"];
+                auto fn = instructionFunctions[ARM_madd];
                 return irb.CreateCall(fn, {mulOp1, mulOp2, addOp1});
             },
             llvm::Instruction::Add,
@@ -2501,7 +2550,7 @@ cont:
 
                 auto subOp1 = OP_N_MAT(instr,0);
 
-                auto fn = instructionFunctions["ARM_msub"];
+                auto fn = instructionFunctions[ARM_msub];
                 return irb.CreateCall(fn, {mulOp1, mulOp2, subOp1});
             },
             llvm::Instruction::Sub,
@@ -2515,7 +2564,7 @@ cont:
         Pattern::make_root(                                                                                      \
             [](llvm::IRBuilder<>& irb){                                                                          \
                 auto instr = &*irb.GetInsertPoint();                                                             \
-                return irb.CreateCall(instructionFunctions[(armInstr)], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)}); \
+                return irb.CreateCall(instructionFunctions[armInstr], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)}); \
             },                                                                                                   \
             llvm::Instruction::llvmInstr,                                                                        \
             {}                                                                                                   \
@@ -2530,7 +2579,7 @@ cont:
                 auto* shift = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
                 auto shiftOp1 = OP_N_MAT(shift,0);
                 auto shiftOp2 = OP_N(shift,1); // this has to be an immediate
-                auto fn = instructionFunctions["ARM_add_SHIFT"];
+                auto fn = instructionFunctions[ARM_add_SHIFT];
                 return irb.CreateCall(fn, {addOp1, shiftOp1, shiftOp2});
             },
             llvm::Instruction::Add,
@@ -2552,7 +2601,7 @@ cont:
                 auto* shift = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,0));
                 auto shiftOp1 = OP_N_MAT(shift,0);
                 auto shiftOp2 = OP_N(shift,1); // this has to be an immediate
-                auto fn = instructionFunctions["ARM_add_SHIFT"];
+                auto fn = instructionFunctions[ARM_add_SHIFT];
                 return irb.CreateCall(fn, {addOp2, shiftOp1, shiftOp2});
             },
             llvm::Instruction::Add,
@@ -2575,7 +2624,7 @@ cont:
                 auto* shift = llvm::dyn_cast<llvm::Instruction>(OP_N(instr,1));
                 auto shiftOp1 = OP_N_MAT(shift,0);
                 auto shiftOp2 = OP_N(shift,1); // this has to be an immediate
-                auto fn = instructionFunctions["ARM_sub_SHIFT"];
+                auto fn = instructionFunctions[ARM_sub_SHIFT];
                 return irb.CreateCall(fn, {subOp1, shiftOp1, shiftOp2});
             },
             llvm::Instruction::Sub,
@@ -2601,7 +2650,7 @@ cont:
                     std::swap(op1, op2);
                 }
 
-                return irb.CreateCall(instructionFunctions["ARM_add"], {MAYBE_MAT_CONST(op1), op2});
+                return irb.CreateCall(instructionFunctions[ARM_add], {MAYBE_MAT_CONST(op1), op2});
             },
             llvm::Instruction::Add,
             {}
@@ -2609,7 +2658,7 @@ cont:
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions["ARM_sub"], {OP_N_MAT(instr,0), OP_N(instr,1)});
+                return irb.CreateCall(instructionFunctions[ARM_sub], {OP_N_MAT(instr,0), OP_N(instr,1)});
             },
             llvm::Instruction::Sub,
             {}
@@ -2619,18 +2668,18 @@ cont:
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions["ARM_madd"], {OP_N_MAT(instr,0), OP_N_MAT(instr,1), XZR});
+                return irb.CreateCall(instructionFunctions[ARM_madd], {OP_N_MAT(instr,0), OP_N_MAT(instr,1), XZR});
             },
             llvm::Instruction::Mul,
             {}
         ),
-        TWO_OPERAND_INSTR_PATTERN(SDiv, "ARM_sdiv")
+        TWO_OPERAND_INSTR_PATTERN(SDiv, ARM_sdiv)
         // remainder
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                auto quotient = irb.CreateCall(instructionFunctions["ARM_sdiv"],  {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
-                return irb.CreateCall(instructionFunctions["ARM_msub"], {quotient, OP_N_MAT(instr,1), OP_N_MAT(instr,0)}); // remainder = numerator - (quotient * denominator)
+                auto quotient = irb.CreateCall(instructionFunctions[ARM_sdiv],  {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
+                return irb.CreateCall(instructionFunctions[ARM_msub], {quotient, OP_N_MAT(instr,1), OP_N_MAT(instr,0)}); // remainder = numerator - (quotient * denominator)
             },
             llvm::Instruction::SRem,
             {}
@@ -2641,7 +2690,7 @@ cont:
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions["ARM_lsl_imm"], {OP_N_MAT(instr,0), OP_N(instr,1)});
+                return irb.CreateCall(instructionFunctions[ARM_lsl_imm], {OP_N_MAT(instr,0), OP_N(instr,1)});
             },
             llvm::Instruction::Shl,
             {
@@ -2649,13 +2698,13 @@ cont:
                 {Pattern::make_constant()}
             }
         ),
-        TWO_OPERAND_INSTR_PATTERN(Shl, "ARM_lsl_var")
+        TWO_OPERAND_INSTR_PATTERN(Shl, ARM_lsl_var)
 
         // arithmetic shift right
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions["ARM_asr_imm"], {OP_N_MAT(instr,0), OP_N(instr,1)});
+                return irb.CreateCall(instructionFunctions[ARM_asr_imm], {OP_N_MAT(instr,0), OP_N(instr,1)});
             },
             llvm::Instruction::AShr,
             {
@@ -2663,19 +2712,19 @@ cont:
                 {Pattern::make_constant()}
             }
         ),
-        TWO_OPERAND_INSTR_PATTERN(AShr, "ARM_asr_var")
+        TWO_OPERAND_INSTR_PATTERN(AShr, ARM_asr_var)
 
         // bitwise ops
-        TWO_OPERAND_INSTR_PATTERN(And, "ARM_and")
-        TWO_OPERAND_INSTR_PATTERN(Or, "ARM_orr")
-        TWO_OPERAND_INSTR_PATTERN(Xor, "ARM_eor")
+        TWO_OPERAND_INSTR_PATTERN(And, ARM_and)
+        TWO_OPERAND_INSTR_PATTERN(Or, ARM_orr)
+        TWO_OPERAND_INSTR_PATTERN(Xor, ARM_eor)
 
         // memory
 
         // alloca
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
-                auto stackVar = irb.CreateCall(instructionFunctions["ARM_sub_SP"], {irb.getInt64(8)}); // always exactly 8
+                auto stackVar = irb.CreateCall(instructionFunctions[ARM_sub_SP], {irb.getInt64(8)}); // always exactly 8
                 currentFunctionBytesToFreeAtEnd+=8;
 
                 return stackVar;
@@ -2699,11 +2748,11 @@ cont:
                 switch(bitwidthOfLoad){
                 // args: base, offset, offsetshift
                     case 8:
-                        return irb.CreateCall(instructionFunctions["ARM_ldr_sb"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
+                        return irb.CreateCall(instructionFunctions[ARM_ldr_sb], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
                     case 16:
-                        return irb.CreateCall(instructionFunctions["ARM_ldr_sh"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
+                        return irb.CreateCall(instructionFunctions[ARM_ldr_sh], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
                     case 32:
-                        return irb.CreateCall(instructionFunctions["ARM_ldr_sw"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
+                        return irb.CreateCall(instructionFunctions[ARM_ldr_sw], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
                     default: // on 64, the sext is not created by llvm:
                         llvm::errs() << "Fatal pattern matching error during ISel: sext of load with bitwidth " << bitwidthOfLoad << " not supported\n";
                         exit(EXIT_FAILURE);
@@ -2735,7 +2784,7 @@ cont:
                 auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
 
                 // because it doesn't have a sign extension, it is guaranteed to be a 64 bit load
-                return irb.CreateCall(instructionFunctions["ARM_ldr"], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 i.e. times 8
+                return irb.CreateCall(instructionFunctions[ARM_ldr], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 i.e. times 8
             },
             llvm::Instruction::Load,
             {
@@ -2763,11 +2812,11 @@ cont:
                 switch(bitwidthOfStore){
                 // args: value, base, offset, offsetshift
                     case 8:
-                        return irb.CreateCall(instructionFunctions["ARM_str32_b"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
+                        return irb.CreateCall(instructionFunctions[ARM_str32_b], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
                     case 16:
-                        return irb.CreateCall(instructionFunctions["ARM_str32_h"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
+                        return irb.CreateCall(instructionFunctions[ARM_str32_h], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
                     case 32:
-                        return irb.CreateCall(instructionFunctions["ARM_str32"], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
+                        return irb.CreateCall(instructionFunctions[ARM_str32], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
                     default: // on 64, the trunc is not created by llvm:
                         llvm::errs() << "Fatal pattern matching error during ISel: trunc of store with bitwidth " << bitwidthOfStore << " not supported\n";
                         exit(EXIT_FAILURE);
@@ -2804,7 +2853,7 @@ cont:
                 auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(storeInst->getPointerOperand());
                 auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
                 // without truncaton -> no bitwidth check necessary
-                return irb.CreateCall(instructionFunctions["ARM_str"], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr, 0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 for multiplying by 8
+                return irb.CreateCall(instructionFunctions[ARM_str], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr, 0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 for multiplying by 8
             },
             llvm::Instruction::Store,
             { 
@@ -2825,7 +2874,7 @@ cont:
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions["ARM_ldr"], {OP_N_MAT(instr,0)});
+                return irb.CreateCall(instructionFunctions[ARM_ldr], {OP_N_MAT(instr,0)});
             },
             llvm::Instruction::Load,
             {}
@@ -2833,7 +2882,7 @@ cont:
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions["ARM_str"], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
+                return irb.CreateCall(instructionFunctions[ARM_str], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
             },
             llvm::Instruction::Store,
             {}
@@ -2864,9 +2913,9 @@ cont:
                 llvm::ConstantInt* indexConst;
                 if((indexConst = llvm::dyn_cast_or_null<llvm::ConstantInt>(indexOp))!= nullptr){
                     auto index = indexConst->getSExtValue();
-                    return irb.CreateCall(instructionFunctions["ARM_add"], {OP_N_MAT(intToPtr,0), irb.getInt64(index << shiftInt)});
+                    return irb.CreateCall(instructionFunctions[ARM_add], {OP_N_MAT(intToPtr,0), irb.getInt64(index << shiftInt)});
                 } else {
-                    return irb.CreateCall(instructionFunctions["ARM_add_SHIFT"], {OP_N_MAT(intToPtr, 0), indexOp, irb.getInt64(shiftInt)});
+                    return irb.CreateCall(instructionFunctions[ARM_add_SHIFT], {OP_N_MAT(intToPtr, 0), indexOp, irb.getInt64(shiftInt)});
                 }
             },
             llvm::Instruction::PtrToInt,
@@ -2887,7 +2936,7 @@ cont:
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb){
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions["ARM_mov_ptr"], {OP_N_MAT(instr,0)}); // in reality, it would just be deleted
+                return irb.CreateCall(instructionFunctions[ARM_mov_ptr], {OP_N_MAT(instr,0)}); // in reality, it would just be deleted
             },
             llvm::Instruction::PtrToInt,
             {}
@@ -2913,8 +2962,8 @@ cont:
                 auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
                 auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
 
-                auto cmp = irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(innerCond,0), OP_N_MAT(innerCond,1)});
-                auto call = irb.CreateCall(instructionFunctions["ARM_b_cond"], {cmp, predStrLiteral});
+                auto cmp = irb.CreateCall(instructionFunctions[ARM_cmp], {OP_N_MAT(innerCond,0), OP_N_MAT(innerCond,1)});
+                auto call = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp, predStrLiteral});
                 // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
                 irb.CreateCondBr(call, trueBlock, falseBlock);
                 return call;
@@ -2946,7 +2995,7 @@ cont:
                 auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
                 auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
 
-                auto call = irb.CreateCall(instructionFunctions["ARM_b_cbnz"], {condInner});
+                auto call = irb.CreateCall(instructionFunctions[ARM_b_cbnz], {condInner});
                 // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
                 irb.CreateCondBr(call, trueBlock, falseBlock);
                 return call;
@@ -2962,7 +3011,7 @@ cont:
             [](llvm::IRBuilder<>& irb){
                 auto instr = dyn_cast<llvm::BranchInst>(&*irb.GetInsertPoint());
                 // cannot be conditional branch, because that always has an icmp NE as its condition, thats matched before
-                return irb.CreateCall(instructionFunctions["ARM_b"], {OP_N(instr,0)});
+                return irb.CreateCall(instructionFunctions[ARM_b], {OP_N(instr,0)});
             },
             llvm::Instruction::Br, 
             {},
@@ -2981,9 +3030,9 @@ cont:
                 // get llvm string literal which displayes predStr
                 auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
 
-                irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
+                irb.CreateCall(instructionFunctions[ARM_cmp], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
 
-                return irb.CreateCall(instructionFunctions["ARM_csel"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral});
+                return irb.CreateCall(instructionFunctions[ARM_csel], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral});
             },
             llvm::Instruction::ZExt,
             {
@@ -3001,9 +3050,9 @@ cont:
                 // get llvm string literal which displayes predStr
                 auto predStrLiteral = llvm::ConstantDataArray::getString(ctx, predStr);
 
-                irb.CreateCall(instructionFunctions["ARM_cmp"], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
+                irb.CreateCall(instructionFunctions[ARM_cmp], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
 
-                return irb.CreateCall(instructionFunctions["ARM_csel_i1"], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral});
+                return irb.CreateCall(instructionFunctions[ARM_csel_i1], {MAT_CONST(irb.getInt64(1)), XZR, predStrLiteral});
             },
             llvm::Instruction::ICmp,
             {}
@@ -3016,7 +3065,7 @@ cont:
                 auto* phiInstr = llvm::dyn_cast<llvm::PHINode>(OP_N(zextInstr, 0)); // noDelete = true -> we can use this as is
 
 
-                return irb.CreateCall(instructionFunctions["ZExt_handled_in_Reg_Alloc"], {phiInstr});
+                return irb.CreateCall(instructionFunctions[ZExt_handled_in_Reg_Alloc], {phiInstr});
             },
             llvm::Instruction::ZExt,
             {
@@ -3026,8 +3075,6 @@ cont:
     };
 
     void doISel(llvm::raw_ostream& out){
-        initInstructionFunctions();
-
         for(auto& fn : moduleUP->functions()){
             if(fn.isDeclaration()) continue;
 
@@ -3043,7 +3090,7 @@ cont:
                 auto term = block.getTerminator();
                 if(llvm::isa_and_present<llvm::ReturnInst>(term)){
                     irb.SetInsertPoint(term);
-                    irb.CreateCall(instructionFunctions["ARM_add_SP"], {irb.getInt64(currentFunctionBytesToFreeAtEnd)}); // takes immediate
+                    irb.CreateCall(instructionFunctions[ARM_add_SP], {irb.getInt64(currentFunctionBytesToFreeAtEnd)}); // takes immediate
                 }
             }
         }
@@ -3063,6 +3110,7 @@ int main(int argc, char *argv[])
 
 #define MEASURED_TIME_AS_SECONDS(point, iterations) std::chrono::duration_cast<std::chrono::duration<double>>(point ## _end - point ## _start).count()/(static_cast<double>(iterations))
     try{
+		Codegen::ISel::initInstructionFunctions();
         auto parsedArgs = ArgParse::parse(argc, argv);
 
         if(parsedArgs.contains(ArgParse::possible.help)){

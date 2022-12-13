@@ -3185,12 +3185,26 @@ int main(int argc, char *argv[])
                     outputFile.close();
                 }else{
                     ast->printDOT(std::cout);
+    void breakCriticalEdges(llvm::Function& f){
+        for (auto& bb: f){
+            auto br = llvm::dyn_cast_if_present<llvm::BranchInst>(bb.getTerminator());
+            if(br != nullptr && br->isConditional()){ // current block has 2 successors
+                for(int i = 0; i<2; i++){
+                    auto succ = br->getSuccessor(i);
+                    if(succ->hasNPredecessorsOrMore(2)){ // successor has 2 or more predecessors -> critical edge
+                        // split critical edge
+                        auto newBB = llvm::BasicBlock::Create(ctx, succ->getName()+"-criticalEdgeBreak", &f);
+                        bb.getTerminator()->replaceUsesOfWith(succ, newBB); // replace use of succ with newBB
+                                                                            // TODO i hope this terminator replace doesnt interfere with the phi replace
+                        succ->replacePhiUsesWith(&bb, newBB); // replace use of succ with newBB in phi nodes
+                        DEBUGLOG("Replaced use of " << bb.getName() << " with " << newBB->getName() << " in phi nodes of " << succ->getName() << " in " << f.getName())
+                        llvm::IRBuilder<> irb(newBB);
+                        irb.CreateBr(succ);
+                    }
                 }
-            }else{
-                ast->print(std::cout);
             }
-        }else if(parsedArgs.contains(ArgParse::possible.llvm)){
-            if(parsedArgs.contains(ArgParse::possible.output)){
+        }
+    }
                 std::error_code errorCode;
                 llvm::raw_fd_ostream outputFile{parsedArgs.at(ArgParse::possible.output), errorCode};
                 MEASURE_TIME_START(codegen);

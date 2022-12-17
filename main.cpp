@@ -18,11 +18,24 @@
 #include <sstream>
 #include <charconv>
 #include <queue>
+#include <list>
+#include <utility>
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
+#include <llvm/Config/llvm-config.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/Metadata.h>
+#include <llvm/IR/ValueMap.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <llvm/ADT/SmallSet.h>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/PostOrderIterator.h>
+#include <llvm/IR/Dominators.h>
 #pragma GCC diagnostic pop
 
 using std::string;
@@ -40,9 +53,10 @@ using std::unique_ptr;
 #define THROW_TODO\
     throw std::runtime_error("TODO(Line " STRINGIZE_MACRO(__LINE__) "): Not implemented yet")
 
+#define THROW_TODO_X(x)\
+    throw std::runtime_error("TODO(Line " STRINGIZE_MACRO(__LINE__) "): " x)
 
 // search for "HW 6" to find the start of the new code
-// TODO
 
 
 struct Token{
@@ -1183,11 +1197,12 @@ namespace ArgParse{
         const Arg llvm{"l", "llvm", 0, "Output LLVM IR (mutually exclusive with p/d/u), by default to stdout, except if an output file is specified using -o", false, true};
         const Arg nowarn{"w", "nowarn", 0, "Do not generate warnings during the LLVM codegeneration phase (has no effect unless -l is specified)", false, true};
         const Arg isel{"s", "isel", 0, "Run the custom ARM instruction selector (has no effect unless -l is specified)", false, true};
+        const Arg regalloc{"r", "regalloc", 0, "Run the custom ARM register allocator (has no effect unless -l and -s are specified)", false, true};
 
 
         const Arg sentinel{"", "", 0, "", false, false};
 
-        const Arg* const all[14] = {&help, &input, &dot, &output, &print, &preprocess, &url, &nosemantic, &benchmark, &iterations, &llvm, &nowarn, &isel, &sentinel};
+        const Arg* const all[15] = {&help, &input, &dot, &output, &print, &preprocess, &url, &nosemantic, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
         
         // iterator over all
         const Arg* begin() const{
@@ -1195,7 +1210,7 @@ namespace ArgParse{
         }
 
         const Arg* end() const{
-            return all[13];
+            return all[14];
         }
     } possible;
 
@@ -1229,6 +1244,7 @@ namespace ArgParse{
         std::cerr << "  "         << "main input.b -pdu"                   << std::endl;
         std::cerr << "  "         << "main -lE input.b"                    << std::endl;
         std::cerr << "  "         << "main -ls input.b"                    << std::endl;
+        std::cerr << "  "         << "main -lsr input.b"                   << std::endl;
     }
 
     //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
@@ -2256,7 +2272,7 @@ namespace Codegen::ISel{
             }
             return true;
         }
-    };
+    }; // struct Pattern
 
     const Pattern Pattern::emptyPattern = Pattern{0,{}, false, false, true};;
     std::unordered_map<Pattern, llvm::CallInst* (*)(llvm::IRBuilder<>&), Pattern::PatternHash> Pattern::replacementCalls{};
@@ -2267,6 +2283,7 @@ namespace Codegen::ISel{
         llvm::Instruction::Call,
         llvm::Instruction::Unreachable,
         llvm::Instruction::PHI,
+        llvm::Instruction::Alloca, // think about this again
     };
 
     /// for useful matching the patterns need to be sorted by totalSize (descending) here. For this simple isel, this is just done by hand
@@ -2343,7 +2360,9 @@ cont:
         return matches;
     }
 
+    } // namespace Codegen::ISel
 
+namespace Codegen{
     // not an enum class for readability, all instructions are prefixed with ARM_ anyway
     enum ARMInstruction{
         ARM_add,
@@ -2381,6 +2400,8 @@ cont:
         ARM_str32,
         ARM_str32_b,
         ARM_str32_h,
+
+        ARM_PSEUDO_str, // for stores which don't know what register they're storing from yet
 
         ARM_b_cond,
         ARM_b,
@@ -2459,6 +2480,8 @@ static void initInstructionFunctions(){
         CREATE_INST_FN_VARARGS(ARM_str32_b,  voidTy),
         CREATE_INST_FN_VARARGS(ARM_str32_h,  voidTy),
 
+        CREATE_INST_FN_VARARGS(ARM_PSEUDO_str, voidTy),
+
         // control flow/branches
         CREATE_INST_FN_VARARGS(ARM_b_cond, llvm::Type::getInt1Ty(ctx)),
         CREATE_INST_FN_VARARGS(ARM_b,      voidTy),
@@ -2471,28 +2494,32 @@ static void initInstructionFunctions(){
 
 
 
+
 #undef CREATE_INST_FN
 
     // ARM zero register, technically not necessary, but its nice programatically, in order not to use immediate operands where its not possible
     auto XZR = llvm::ConstantInt::get(i64, 0);
 
+} // namespace Codegen
+
+namespace Codegen::ISel{
+
+/// always inserts a mov to materialize the given constant
+#define MAT_CONST(value) irb.CreateCall(instructionFunctions[ARM_mov], {value})
 
 /// check if the given value is a constant and, if so, materialize it
 #define MAYBE_MAT_CONST(value)                                                                           \
         (llvm::isa<llvm::ConstantInt>(value) && (!llvm::dyn_cast<llvm::ConstantInt>(value)->isZero())) ? \
-            irb.CreateCall(instructionFunctions[ARM_mov], {value}) :                                   \
+            (MAT_CONST(value)) :                                                                         \
             (value)
-
-/// always inserts a mov to materialize the given constant
-#define MAT_CONST(value) irb.CreateCall(instructionFunctions[ARM_mov], {value})
-            
-/// gets the nth operand of the instruction and materializes it if necessary
-#define OP_N_MAT(instr, N) \
-        MAYBE_MAT_CONST(instr->getOperand(N))
 
 /// get the nth operand of the instruction
 #define OP_N(instr, N) \
         instr->getOperand(N)
+            
+/// gets the nth operand of the instruction and materializes it if necessary
+#define OP_N_MAT(instr, N) \
+        MAYBE_MAT_CONST(OP_N(instr, N))
 
     /// all ARM patterns
     /// these are matched in order, so they are roughly sorted by size
@@ -2722,16 +2749,17 @@ static void initInstructionFunctions(){
         // memory
 
         // alloca
-        Pattern::make_root(
-            [](llvm::IRBuilder<>& irb){
-                auto stackVar = irb.CreateCall(instructionFunctions[ARM_sub_SP], {irb.getInt64(8)}); // always exactly 8
-                currentFunctionBytesToFreeAtEnd+=8;
-
-                return stackVar;
-            },
-            llvm::Instruction::Alloca // always allocates an i64 in our case
-                                       // there is always a store that uses this alloca, but to not delete/replace it, we match the alloca itself
-        ),
+        // TODO i think this should just be handled later when allocating the stackframe
+        //Pattern::make_root(
+        //    [](llvm::IRBuilder<>& irb){
+        //        auto stackVar = irb.CreateCall(instructionFunctions[ARM_sub_SP], {irb.getInt64(8)}); // always exactly 8
+        //        currentFunctionBytesToFreeAtEnd+=8;
+        //
+        //        return stackVar;
+        //    },
+        //    llvm::Instruction::Alloca // always allocates an i64 in our case
+        //                               // there is always a store that uses this alloca, but to not delete/replace it, we match the alloca itself
+        //),
 
         // sign extends can only happen after loadsA
         // truncation can only happen before stores
@@ -3075,6 +3103,11 @@ static void initInstructionFunctions(){
     };
 
     void doISel(llvm::raw_ostream& out){
+        // add metadata to instr functions
+        for(auto& instr : instructionFunctions){
+            instr.second->setMetadata("arm_instruction_function", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64,std::to_underlying(instr.first)))}));
+        }
+
         for(auto& fn : moduleUP->functions()){
             if(fn.isDeclaration()) continue;
 
@@ -3099,6 +3132,492 @@ static void initInstructionFunctions(){
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
         if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
     }
+} // namespace Codegen::ISel
+
+// REFACTOR maybe at some point instruction scheduling
+
+namespace Codegen::RegAlloc{
+    // normal enum, because the int values are important and much more convenient
+    enum Register{
+        X0 = 0, X1 = 1, X2 = 2, X3 = 3, X4 = 4, X5 = 5, X6 = 6, X7 = 7,
+
+        // special, not used for normal registers (start at X24 because callee saved)
+        X24 = 24, // phi-cycle break
+        X25 = 25, // mem-mem stores register
+    };
+    inline Register operator++(Register& reg, int){
+        auto old = reg;
+        reg = static_cast<Register>(static_cast<int>(reg)+1);
+        return old;
+    }
+
+    Register phiCycleBreakRegister = X24;
+    Register memMemStoresRegister = X24;
+
+    std::unordered_set<Register> initialFreeRegisters{
+        Register::X0,
+        Register::X1,
+        Register::X2,
+        Register::X3,
+        Register::X4,
+        Register::X5,
+        Register::X6,
+        Register::X7,
+    };
+
+    struct AllocatedRegister{
+        llvm::Value* value;
+        const Register reg;
+        bool noSpill{false};
+
+        // TODO maybe remove if unnecessary
+        class Hash{
+            public:
+            size_t operator()(const AllocatedRegister& x) const{
+                return std::hash<llvm::Value*>()(x.value);
+            }
+        };
+    };
+
+    struct AllocatedStackslot{
+        llvm::Value* value;
+        /// offset from base of spill allocation area, but in (ARM) doublewords, i.e. offset 2 means starting at byte 16
+        int offset;
+
+        // TODO maybe remove if unnecessary
+        class Hash{
+            public:
+            size_t operator()(const AllocatedStackslot& x) const{
+                return std::hash<llvm::Value*>()(x.value);
+            }
+        };
+    };
+
+    /// as a macro, because as a function it doesn't work, because setMetadata is protected
+#define SET_METADATA(val, reg)                                                               \
+        (val)->setMetadata("reg", llvm::MDNode::get(ctx,                                       \
+            {llvm::ValueAsMetadata::get(llvm::ConstantInt::get(i64, static_cast<int>(reg)))} \
+        ));
+
+    // TODO does the LRU even work with loops? if values are used from the loop, they will be used again, so they should not be evicted and stuff like that?
+
+    // number of registers available for "general purpose" use, this also excludes registers used for special things, such as phi cycle breaks
+    template<int K>
+    class RegLRU{
+    public:
+        // TODO: test if a SmallVector<K> is actually more efficient, even with remove operations on random points (O(n) on a vector, O(1) on a list, but supposedly, the list is quite terrible)
+        std::list<AllocatedRegister> sortedCache{};
+        std::unordered_set<Register> freeRegisters{initialFreeRegisters};
+
+        // compile with -fno-rtti otherwise this doesn't work
+        llvm::ValueMap<llvm::Value*, std::list<AllocatedRegister>::iterator> registerMap{};
+        llvm::ValueMap<llvm::Value*, AllocatedStackslot> spillMap{};
+
+        /// where to insert spill instructions
+        llvm::IRBuilder<>& irb;
+        llvm::AllocaInst* spillsAllocation;
+
+        RegLRU(llvm::IRBuilder<>& irb, llvm::AllocaInst* spillsAllocation) : irb(irb), spillsAllocation(spillsAllocation){static_assert(K>=2, "Less than 2 registers are not enough for this to work");}
+
+        /// refer to a value known to be in the cache
+        /// behavior is undefined if the value is not in the cache
+        void refer(llvm::Value* val){
+            auto it = registerMap[val];
+            sortedCache.splice(sortedCache.cbegin(), sortedCache, it);
+        }
+
+        /// try to refer to a value, cache it if it's not in the cache
+        void tryRefer(llvm::Value* val){
+            if(registerMap.find(val) != registerMap.end()){
+                // in cache, refer
+                refer(val);
+            }else{
+                // not in cache -> cache it
+                registerForNewValue(val);
+            }
+        }
+
+        AllocatedStackslot& allocateStackslot(llvm::Value* val){
+            int offset = spillMap.size();
+            spillMap[val] = AllocatedStackslot{val, offset};
+            // rewrite spill allocation size (add 8)
+            // REFACTOR: this could be inserted into the IR after having finished register allocation for this function
+            spillsAllocation->setOperand(0,
+                llvm::ConstantExpr::getAdd(
+                    llvm::dyn_cast<llvm::Constant>(spillsAllocation->getOperand(0)),
+                    llvm::ConstantInt::get(
+                        spillsAllocation->getOperand(0)->getType(),
+                        8
+                    )
+                )
+            );
+
+            if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)){
+                inst->setMetadata("stackslot_offset", llvm::MDNode::get(ctx, {llvm::ValueAsMetadata::get(irb.getInt64(offset))}));
+            }
+
+            return spillMap[val];
+        }
+
+        void spill(llvm::Value* val){
+            int offset;
+            if(spillMap.find(val) != spillMap.end()){
+                // stack slot exists, store there
+                offset = spillMap[val].offset;
+            }else{
+                // stack slot does not exist, create it
+                offset = allocateStackslot(val).offset;
+            }
+            // TODO what if the value is only on the stack, not in a register?
+            if(registerMap.find(val) == registerMap.end()){
+                // values isn't in a register, so we can't use it to store the value
+                // instead, we use a special register for this purpose, load it into that one, then stoe from there
+                if(spillMap.find(val) == spillMap.end()){
+                    // TODO this can definitely happen currently, because of the phi issues
+                    THROW_TODO_X("spillXButStoreY: value to be stored not in register and not on stack");
+                }
+                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(spillMap[val].offset), irb.getInt8(3)}, "l");
+                SET_METADATA(load, memMemStoresRegister);
+                val = load; // replace y with the loaded value
+            }
+            // offset is in doublewords, so multiply by 8 by shifting left by 3
+            irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset), irb.getInt8(3)});
+        }
+
+        Register spillAndRemove(){
+            auto valToSpill = sortedCache.back();
+            auto whichReg = valToSpill.reg;
+            if(!valToSpill.noSpill){
+                spill(valToSpill.value);
+            }
+
+            registerMap.erase(sortedCache.back().value);
+            sortedCache.pop_back();
+            return whichReg;
+        }
+
+        const Register& assignReg(llvm::Value* val, Register& r){
+            bool noSpill = false;
+            if(auto inst = dyn_cast_if_present<llvm::CallInst>(val)){
+                // TODO set noSpill here if it's a materializing mov
+                // at the moment all ARM_mov instructions are materializing, so this check suffices
+                if(inst->getCalledFunction()==instructionFunctions[ARM_mov]){
+                    noSpill = true;
+                }
+            }
+            sortedCache.emplace_front(AllocatedRegister{val, Register{r}});
+            sortedCache.front().noSpill = noSpill;
+            registerMap[val] = sortedCache.begin();
+            return sortedCache.cbegin()->reg;
+        }
+
+        /// insert a new value into the cache, spills the least recently used value if the cache is full
+        const Register& registerForNewValue(llvm::Value* val){
+            Register whichReg;
+            if(sortedCache.size() == K){
+                // cache is full, spill the least recently used value
+                whichReg = spillAndRemove();
+            }else{
+                // cache is not full, use a free register
+                auto it = freeRegisters.begin();
+                whichReg = *it;
+                freeRegisters.erase(it);
+            }
+            // insert new value
+            return assignReg(val, whichReg);
+        }
+
+        /// get the register allocated to a value (which is either in a register or on the stack), assign one and load it from the stack if necessary, spill the least recently used value if the cache is full
+        const std::pair<const Register&, llvm::Value*> registerForExistingValue(llvm::Value* val){
+            if(registerMap.find(val) != registerMap.end()){
+                // in cache, refer
+                refer(val);
+                return {registerMap[val]->reg, val};
+            }else{
+                // not in cache -> has to be on the stack, load it
+                int offset = spillMap[val].offset;
+                // offset is in doublewords, so multiply by 8 by shifting left by 3
+                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset), irb.getInt8(3)}, "l");
+                auto reg = registerForNewValue(val); // get a register for the value, this also caches it
+                SET_METADATA(load, reg); // set the register metadata on the load instruction
+                // instead of RAU of the value with the load, return it and replace the val in the use that this is needed for with load in the caller
+                return {reg, load};
+            }
+        }
+
+        void handleFunctionCall(llvm::CallInst* call){
+            irb.SetInsertPoint(call);
+
+            // spill and remove all registers from cache
+            while(sortedCache.size() > 0){
+                spillAndRemove();
+            }
+
+            // REFACTOR: use values from registers if possible
+            // for simplicity (to avoid cycles/chains in these moves), load the arguments into the parameter registers from the stack, so they don't override each other
+            Register reg = X0;
+            if(call->getNumOperands() > 8){
+                THROW_TODO;
+            }
+            for(auto& arg : call->args()){
+                // only handle arguments which are themselves reg-allocated at all, and are not phi nodes (these are only ever directly written to the stack, never spill stored)
+                if(!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg") || llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("phi")){
+                    continue;
+                }
+                if(arg->hasName() && arg->getName().startswith("phi_")){
+                    DEBUGLOG("MISTAKENLY HANDLING PHI NODE AS ARGUMENT: " << *arg)
+                }
+
+                int offset = spillMap[arg].offset;
+                // offset is in doublewords, so multiply by 8 by shifting left by 3
+                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset), irb.getInt8(3)}, "l");
+                SET_METADATA(load, reg++);
+            }
+
+            // TODO test this is correct (it should at least always work, call always has at least a terminator following it)
+            irb.SetInsertPoint(call->getNextNode());
+
+            // return value into X0
+            this->freeRegisters = {X0};
+            registerForNewValue(call);
+            SET_METADATA(call, X0);
+
+            // set all other registers as free
+            this->freeRegisters = initialFreeRegisters;
+            this->freeRegisters.erase(X0);
+        }
+    };
+
+    void handlePhiChainsCycles(RegLRU<8>& regLRU, llvm::iterator_range<llvm::BasicBlock::phi_iterator> phiNodes){
+        // TODO materializing mov for PHIs
+        if(phiNodes.begin() == phiNodes.end()){
+            return;
+        }
+
+        DEBUGLOG("phis for block " << phiNodes.begin()->getParent()->getName());
+
+        // allocate a stack slot for each phi
+        int phiCounter = regLRU.spillMap.size();
+        for(auto& phi : phiNodes){
+            regLRU.spillMap[&phi] = AllocatedStackslot{&phi, phiCounter};
+            phiCounter++;
+        }
+        // enlarge the stack allocation
+        regLRU.spillsAllocation->setOperand(0,
+            llvm::ConstantExpr::getAdd(
+                llvm::dyn_cast<llvm::Constant>(regLRU.spillsAllocation->getOperand(0)),
+                llvm::ConstantInt::get(
+                    regLRU.spillsAllocation->getOperand(0)->getType(),
+                    phiCounter * 8
+                )
+            )
+        );
+
+        // per edge:
+        unsigned edges = phiNodes.begin()->getNumIncomingValues();
+        for(unsigned int edgeNum = 0; edgeNum<edges; edgeNum++){
+            DEBUGLOG("handling edge to " << phiNodes.begin()->getIncomingBlock(edgeNum)->getName());
+            llvm::ValueMap<llvm::PHINode*, int> numReaders;
+            llvm::ValueMap<llvm::PHINode*, llvm::SmallPtrSet<llvm::PHINode*, 8>> readBy;
+
+            llvm::SmallPtrSet<llvm::PHINode*, 8> toHandle;
+
+            for(auto& phi : phiNodes){
+                toHandle.insert(&phi);
+
+                auto val = phi.getIncomingValue(edgeNum);
+                auto otherPhi = llvm::dyn_cast_if_present<llvm::PHINode>(val);
+                if(otherPhi && otherPhi->getParent() == phi.getParent()){
+                    readBy[otherPhi].insert(&phi);
+                    numReaders[otherPhi]++;
+                }
+            }
+
+            auto insertBefore = phiNodes.begin()->getIncomingBlock(edgeNum)->getTerminator(); // insert stores to phi nodes at the end of the predecessor block (has been broken to take care of crit. edges)
+            // because isel the terminators are of course not the last instructions anymore, so correct this so it inserts before the actual branches
+            // REFACTOR: this looks terrible
+            while(insertBefore->getPrevNode() != nullptr && (insertBefore->getOpcode() == llvm::Instruction::Br || (llvm::isa<llvm::CallInst>(insertBefore) && 
+                           (llvm::dyn_cast_if_present<llvm::CallInst>(insertBefore)->getCalledFunction() == instructionFunctions[ARM_b_cond])))){
+                insertBefore = insertBefore->getPrevNode();
+            }
+
+            regLRU.irb.SetInsertPoint(insertBefore);
+
+            // start at phis with 0 readers
+
+#define HANDLE_CHAIN_ELEMENT(phi)                                                                                                                         \
+    /* (pseudo-)store to stack, needs to be looked at by regalloc again later on, possibly to insert load for incoming value, if its not in a register */ \
+    regLRU.irb.CreateCall(                                                                                                                                \
+            instructionFunctions[ARM_PSEUDO_str],                                                                                                         \
+            {phi->getIncomingValue(edgeNum), regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset), regLRU.irb.getInt8(3)});          \
+    toHandle.erase(phi);                                                                                                                                  \
+    /* TODO right way around? */                                                                                                                          \
+    for(auto reader: readBy[phi]){                                                                                                                        \
+        numReaders[reader]--;                                                                                                                             \
+    }
+
+
+            unsigned notChangedCounter = 0;
+            while(toHandle.size()>0 && notChangedCounter < toHandle.size()){
+                auto phi = *toHandle.begin();
+                notChangedCounter++;
+
+                if(numReaders[phi] == 0){
+                    HANDLE_CHAIN_ELEMENT(phi);
+
+                    notChangedCounter = 0;
+                }
+            }
+
+            if(toHandle.size() > 1){
+                DEBUGLOG("found cycle of length >=2") // cycles of length 1 can happen, but are simply ignored, because they would result in a load/store from/to the same stack slot
+
+                // cycle
+                // temporarily save one of the phi nodes in the special register
+                auto phi = *toHandle.begin();
+                auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset) , regLRU.irb.getInt8(3)}, "phiCycleBreak");
+                auto firstStore = load;
+                numReaders[phi]--;
+                SET_METADATA(load, phiCycleBreakRegister);
+
+                // handle chain until last element
+                while(toHandle.size()>1){
+                    phi = *toHandle.begin();
+
+                    if(numReaders[phi] == 0){
+                        HANDLE_CHAIN_ELEMENT(phi);
+                    }
+                }
+
+                // last element gets assigned the special register
+                phi = *toHandle.begin();
+                regLRU.irb.CreateCall(instructionFunctions[ARM_str], {firstStore, regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset) , regLRU.irb.getInt8(3)});
+            }
+        }
+
+        // replace all phis with loads from the stack
+        for(auto& phi : llvm::make_early_inc_range(phiNodes)){
+            regLRU.irb.SetInsertPoint(phi.getParent()->getFirstNonPHI());
+            auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[&phi].offset) , regLRU.irb.getInt8(3)}, "phi_" + phi.getName());
+            load->setMetadata("phi", llvm::MDNode::get(ctx, {}));
+            phi.replaceAllUsesWith(load);
+            phi.eraseFromParent();
+        }
+    }
+
+    void regallocFn(llvm::Function& f){
+        unsigned ret = llvm::SplitAllCriticalEdges(f);
+        (void) ret;
+        DEBUGLOG("split " << ret << " critical edges")
+
+        llvm::IRBuilder<> irb(f.getEntryBlock().getFirstNonPHI());
+        auto spillsAllocation = irb.CreateAlloca(irb.getInt64Ty(), irb.getInt64(0), "spills");
+        RegLRU<8> regLRU{irb, spillsAllocation};
+
+        // first handle phi node problems, by allocating stack slots for them, and inserting pseudo instructions to load/store them, which will get filled in by the register allocator
+        // REFACTOR: To improve the performance of the allocator as whole, we could try to distinguish between register and normal phis, because phis are usually so important, that giving them their own register is worth it
+        // the vague strategy would then be: replace the phis with registers, with some heuristic of what percentage of registers they can take up, make a map of bb to phi-occupied-registers, so they are not reallocated (this would be somewhat cumbersome, because it would need to include every BB on the CFG in between the definition of the value used by the phi and the phi itself), and then run the register allocator for the remaining registers on the BBs, taking into account which can still be used
+        for(auto& bb: f){
+            handlePhiChainsCycles(regLRU, bb.phis());
+        }
+
+        if(f.arg_size() > 8){
+            THROW_TODO;
+        }
+        
+        // assign registers from X0 up to X7 to the arguments
+        Register reg = X0;
+        for(auto& param: f.args()){
+            regLRU.assignReg(&param, reg);
+            reg++;
+            // cannot set metadata on function parameters, so this has to be implicit
+        }
+
+        llvm::DominatorTree DT = llvm::DominatorTree(f);
+
+        // i hope this encounters stuff in the correct order
+        // I think it does, *except for the arguments of phi nodes*! -> either handle phis before everything else and insert a pseudo reference, to a value that is not yet defined (but will be defined in the same block by the register allocator later)
+        for(auto& bbNode: llvm::depth_first(&DT)){
+            auto bb = bbNode->getBlock();
+            for(auto& inst: *bb){
+                if(auto call = llvm::dyn_cast_if_present<llvm::CallInst>(&inst)){
+                    // pseudo stores for phis
+                    if (call->getCalledFunction() == instructionFunctions[ARM_PSEUDO_str]) {
+                        // pseudo store, we need to possibly insert load for mem-mem mov
+                        regLRU.irb.SetInsertPoint(call);
+
+                        auto val = call->getArgOperand(0);
+                        
+                        // materialize constant
+                        llvm::Value* newVal = val;
+                        if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(val) ) {
+                            if(!constInt->isZero()){
+                                newVal = irb.CreateCall(instructionFunctions[ARM_mov], {irb.getInt64(constInt->getZExtValue())});
+                            }
+                        }else{
+                            newVal = regLRU.registerForExistingValue(val).second;
+                        }
+
+                        call->replaceUsesOfWith(val, newVal);
+                        call->setCalledFunction(instructionFunctions[ARM_str]);
+                    }else if(call->getCalledFunction()->getReturnType()==voidTy || call->hasMetadata("reg")
+                            || call->getCalledFunction()==instructionFunctions[ARM_b]
+                            || call->getCalledFunction()==instructionFunctions[ARM_b_cond]
+                            || call->getCalledFunction()==instructionFunctions[ARM_b_cbnz]
+                    ){
+                        continue;
+                    }else if(!call->getCalledFunction()->hasMetadata("arm_instruction_function")){
+                        regLRU.handleFunctionCall(call);
+                    }else{
+                        regLRU.irb.SetInsertPoint(call);
+
+                        // loads for phis dont need seperate loads for their arguments, those are already correct
+                        if(!call->hasMetadata("phi")){
+                            for(auto& arg: call->args()){
+                                // only handle arguments which are themselves reg-allocated at all, and are not phi nodes (these are only ever directly written to the stack, never spill stored)
+                                if(!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg") || llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("phi")){
+                                    continue;
+                                }
+#ifndef NDEBUG
+                                if(arg->hasName() && arg->getName().startswith("phi_")){
+                                    DEBUGLOG("MISTAKENLY HANDLING PHI NODE AS ARGUMENT: " << *arg)
+                                }
+#endif
+                                auto [_, newVal] = regLRU.registerForExistingValue(arg);
+                                call->replaceUsesOfWith(arg, newVal);
+                            }
+                        }
+                        regLRU.tryRefer(call);
+                        SET_METADATA(call, regLRU.registerMap[call]->reg)
+                    }
+                }else{
+                    if(llvm::isa<llvm::AllocaInst>(inst) || llvm::isa<llvm::BranchInst>(inst) || llvm::isa<llvm::ReturnInst>(inst) || llvm::isa<llvm::UnreachableInst>(inst)){
+                        // TODO do this nicer
+                        continue;
+                    }else{
+                        DEBUGLOG("cannot handle instruction " << inst)
+                        THROW_TODO;
+                    }
+                }
+            }
+        }
+    }
+
+    void doRegAlloc(llvm::raw_ostream& out){
+        for(auto& f : *moduleUP){
+            if(f.isDeclaration()){
+                continue;
+            }
+
+            regallocFn(f);
+        }
+
+        moduleUP->print(out, nullptr);
+        bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
+        if(moduleIsBroken) llvm::errs() << "RegAlloc broke module :(\n";
+    }
+
+    
 }
 
 
@@ -3109,145 +3628,135 @@ int main(int argc, char *argv[])
 #define MEASURE_TIME_END(point) auto point ## _end = std::chrono::high_resolution_clock::now()
 
 #define MEASURED_TIME_AS_SECONDS(point, iterations) std::chrono::duration_cast<std::chrono::duration<double>>(point ## _end - point ## _start).count()/(static_cast<double>(iterations))
-    try{
-		Codegen::ISel::initInstructionFunctions();
-        auto parsedArgs = ArgParse::parse(argc, argv);
 
-        if(parsedArgs.contains(ArgParse::possible.help)){
-            ArgParse::printHelp();
-            return 0;
-        }
+    Codegen::initInstructionFunctions();
+    auto parsedArgs = ArgParse::parse(argc, argv);
 
-        std::string inputFilename = parsedArgs.at(ArgParse::possible.input);
-        int iterations = 1;
-        if(parsedArgs.contains(ArgParse::possible.iterations)){
-            iterations = std::stoi(parsedArgs.at(ArgParse::possible.iterations));
-        }
+    if(parsedArgs.contains(ArgParse::possible.help)){
+        ArgParse::printHelp();
+        return 0;
+    }
 
-        if(access(inputFilename.c_str(),R_OK) != 0){
-            perror("Could not open input file");
-            return 1;
-        }
+    std::string inputFilename = parsedArgs.at(ArgParse::possible.input);
+    int iterations = 1;
+    if(parsedArgs.contains(ArgParse::possible.iterations)){
+        iterations = std::stoi(parsedArgs.at(ArgParse::possible.iterations));
+    }
 
-        std::ifstream inputFile{inputFilename};
-        if(parsedArgs.contains(ArgParse::possible.preprocess)){
-            //this is a bit ugly, but it works
-            std::stringstream ss;
+    if(access(inputFilename.c_str(),R_OK) != 0){
+        perror("Could not open input file");
+        return 1;
+    }
 
-            auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
-            ss << "cpp -E -P " << parsedArgs.at(ArgParse::possible.input) << " > /tmp/" << epochsecs << ".bpreprocessed";
-            system(ss.str().c_str());
+    std::ifstream inputFile{inputFilename};
+    std::string preprocessedFilePath;
 
-            inputFile = std::ifstream{"/tmp/" + std::to_string(epochsecs) + ".bpreprocessed"};
-        }
+    auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
+    if(parsedArgs.contains(ArgParse::possible.preprocess)){
+        //this is a bit ugly, but it works
+        std::stringstream ss;
 
-        Parser parser{inputFile};
+        ss << "cpp -E -P " << parsedArgs.at(ArgParse::possible.input) << " > /tmp/" << epochsecs << ".bpreprocessed";
+        system(ss.str().c_str());
 
-        MEASURE_TIME_START(parse);
-        unique_ptr<AST> ast;
+        preprocessedFilePath="/tmp/" + std::to_string(epochsecs) + ".bpreprocessed";
+        inputFile = std::ifstream{preprocessedFilePath};
+    }
+
+    Parser parser{inputFile};
+
+    MEASURE_TIME_START(parse);
+    unique_ptr<AST> ast;
+    for(int i = 0; i<iterations; i++){
+        ast = parser.parse();
+        parser.resetTokenizer();
+    }
+    MEASURE_TIME_END(parse);
+
+    if(parsedArgs.contains(ArgParse::possible.preprocess)) system(("rm " + preprocessedFilePath).c_str());
+
+    MEASURE_TIME_START(semanalyze);
+    if(!parsedArgs.contains(ArgParse::possible.nosemantic)){
         for(int i = 0; i<iterations; i++){
-            ast = parser.parse();
-            parser.resetTokenizer();
-        }
-        MEASURE_TIME_END(parse);
-
-        if(parsedArgs.contains(ArgParse::possible.preprocess)) system("rm /tmp/*.bpreprocessed");
-
-        MEASURE_TIME_START(semanalyze);
-        if(!parsedArgs.contains(ArgParse::possible.nosemantic)){
-            for(int i = 0; i<iterations; i++){
-                SemanticAnalysis::reset();
-                SemanticAnalysis::analyze(*ast);
-            }
-        }
-        MEASURE_TIME_END(semanalyze);
-
-        if(parser.failed || SemanticAnalysis::failed){
-            return EXIT_FAILURE;
-        }
-
-        bool genSuccess = false;
-
-        double codegenSeconds{0.0};
-        double iselSeconds{0.0};
-
-        if(parsedArgs.contains(ArgParse::possible.print) || parsedArgs.contains(ArgParse::possible.dot)){
-            if(parsedArgs.contains(ArgParse::possible.url)){
-                std::stringstream ss;
-                ast->printDOT(ss);
-                auto compactSpacesRegex = std::regex("\\s+");
-                auto str = std::regex_replace(ss.str(), compactSpacesRegex, " ");
-                std::cout << "https://dreampuf.github.io/GraphvizOnline/#" << url_encode(str) << std::endl;
-            }else if(parsedArgs.contains(ArgParse::possible.dot)){
-                if(parsedArgs.contains(ArgParse::possible.output)){
-                    std::ofstream outputFile{parsedArgs.at(ArgParse::possible.output)};
-                    ast->printDOT(outputFile);
-                    outputFile.close();
-                }else{
-                    ast->printDOT(std::cout);
-    void breakCriticalEdges(llvm::Function& f){
-        for (auto& bb: f){
-            auto br = llvm::dyn_cast_if_present<llvm::BranchInst>(bb.getTerminator());
-            if(br != nullptr && br->isConditional()){ // current block has 2 successors
-                for(int i = 0; i<2; i++){
-                    auto succ = br->getSuccessor(i);
-                    if(succ->hasNPredecessorsOrMore(2)){ // successor has 2 or more predecessors -> critical edge
-                        // split critical edge
-                        auto newBB = llvm::BasicBlock::Create(ctx, succ->getName()+"-criticalEdgeBreak", &f);
-                        bb.getTerminator()->replaceUsesOfWith(succ, newBB); // replace use of succ with newBB
-                                                                            // TODO i hope this terminator replace doesnt interfere with the phi replace
-                        succ->replacePhiUsesWith(&bb, newBB); // replace use of succ with newBB in phi nodes
-                        DEBUGLOG("Replaced use of " << bb.getName() << " with " << newBB->getName() << " in phi nodes of " << succ->getName() << " in " << f.getName())
-                        llvm::IRBuilder<> irb(newBB);
-                        irb.CreateBr(succ);
-                    }
-                }
-            }
+            SemanticAnalysis::reset();
+            SemanticAnalysis::analyze(*ast);
         }
     }
-                std::error_code errorCode;
-                llvm::raw_fd_ostream outputFile{parsedArgs.at(ArgParse::possible.output), errorCode};
-                MEASURE_TIME_START(codegen);
-                if(!(genSuccess = Codegen::generate(*ast, outputFile))){
-                    llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
-                }
-                MEASURE_TIME_END(codegen);
-                codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
-                if(parsedArgs.contains(ArgParse::possible.isel)){
-                    MEASURE_TIME_START(isel);
-                    Codegen::ISel::doISel(outputFile);
-                    MEASURE_TIME_END(isel);
-                    iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
-                }
-                outputFile.close();
-            }else{
-                MEASURE_TIME_START(codegen);
-                if(!(genSuccess = Codegen::generate(*ast, llvm::outs()))){
-                    llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
-                }
-                MEASURE_TIME_END(codegen);
-                codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
-                if(parsedArgs.contains(ArgParse::possible.isel)){
-                    MEASURE_TIME_START(isel);
-                    Codegen::ISel::doISel(llvm::outs());
-                    MEASURE_TIME_END(isel);
-                    iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
-                }
-            }
-        }
-        //print execution times
-        if(parsedArgs.contains(ArgParse::possible.benchmark)){
-            std::cout << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s"  << std::endl;
-            std::cout << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s"  << std::endl;
-            std::cout << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s"  << std::endl;
-            std::cout << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s"  << std::endl;
-            std::cout << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB" << std::endl;
-        }
-        if(!genSuccess) return EXIT_FAILURE;
-    }catch(std::exception& e){
-        std::cerr << "Error (instance of '"<< typeid(e).name() << "'): " << e.what() << std::endl;
+    MEASURE_TIME_END(semanalyze);
+
+    if(parser.failed || SemanticAnalysis::failed){
         return EXIT_FAILURE;
     }
+
+    bool genSuccess = false;
+
+    double codegenSeconds{0.0};
+    double iselSeconds{0.0};
+    double regallocSeconds{0.0};
+
+    if(parsedArgs.contains(ArgParse::possible.print) || parsedArgs.contains(ArgParse::possible.dot)){
+        if(parsedArgs.contains(ArgParse::possible.url)){
+            std::stringstream ss;
+            ast->printDOT(ss);
+            auto compactSpacesRegex = std::regex("\\s+");
+            auto str = std::regex_replace(ss.str(), compactSpacesRegex, " ");
+            std::cout << "https://dreampuf.github.io/GraphvizOnline/#" << url_encode(str) << std::endl;
+        }else if(parsedArgs.contains(ArgParse::possible.dot)){
+            if(parsedArgs.contains(ArgParse::possible.output)){
+                std::ofstream outputFile{parsedArgs.at(ArgParse::possible.output)};
+                ast->printDOT(outputFile);
+                outputFile.close();
+            }else{
+                ast->printDOT(std::cout);
+            }
+        }else{
+            ast->print(std::cout);
+        }
+    }else if(parsedArgs.contains(ArgParse::possible.llvm)){
+        std::error_code errorCode;
+        llvm::raw_ostream* llvmOut = &llvm::outs();
+        llvm::raw_fd_ostream* llvmOutFileToClose = nullptr;
+        if(parsedArgs.contains(ArgParse::possible.output)){
+            llvmOut = llvmOutFileToClose = new llvm::raw_fd_ostream(parsedArgs.at(ArgParse::possible.output), errorCode);
+        }
+        MEASURE_TIME_START(codegen);
+        if(!(genSuccess = Codegen::generate(*ast, *llvmOut))){
+            llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
+        }
+        MEASURE_TIME_END(codegen);
+        codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
+
+        // isel 
+        if(parsedArgs.contains(ArgParse::possible.isel)){
+            MEASURE_TIME_START(isel);
+            Codegen::ISel::doISel(*llvmOut);
+            MEASURE_TIME_END(isel);
+            iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
+            
+            // regalloc
+            if(parsedArgs.contains(ArgParse::possible.regalloc)){
+                MEASURE_TIME_START(regalloc);
+                Codegen::RegAlloc::doRegAlloc(*llvmOut);
+                MEASURE_TIME_END(regalloc);
+                regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
+            }
+        }
+
+        if(llvmOutFileToClose != nullptr){
+            llvmOutFileToClose->close();
+            delete llvmOut;
+        }
+    }
+    //print execution times
+    if(parsedArgs.contains(ArgParse::possible.benchmark)){
+        std::cout << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s"  << std::endl;
+        std::cout << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s"  << std::endl;
+        std::cout << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s"  << std::endl;
+        std::cout << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s"  << std::endl;
+        std::cout << "Average register allocation  time: (over "  << 1          << " iterations): " << regallocSeconds                                  << "s"  << std::endl;
+        std::cout << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB" << std::endl;
+    }
+    if(!genSuccess) return EXIT_FAILURE;
 
     return EXIT_SUCCESS;
 }

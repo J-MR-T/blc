@@ -1,7 +1,7 @@
 # standard cpp makefile
 
 CPPC=g++
-CFLAGS=-Wall -Wextra -Wpedantic -O3 -std=c++20
+CFLAGS=-Wall -Wextra -Wpedantic -O3 -std=c++2b -fno-rtti -lz
 
 LLVM_CONFIG=llvm-config
 

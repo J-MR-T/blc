@@ -3260,6 +3260,14 @@ namespace Codegen::RegAlloc{
         }
 
         void spill(llvm::Value* val){
+            // Dont need to spill if
+            // a) value is not in a register, so we don't need to spill it
+            //   or
+            // b) noSpill is set (e.g. phis, materialized constants)
+            if(registerMap.find(val) == registerMap.end() || registerMap[val]->noSpill){
+                return;
+            }
+
             int offset;
             if(spillMap.find(val) != spillMap.end()){
                 // stack slot exists, store there
@@ -3268,18 +3276,6 @@ namespace Codegen::RegAlloc{
                 // stack slot does not exist, create it
                 offset = allocateStackslot(val).offset;
             }
-            // TODO what if the value is only on the stack, not in a register?
-            if(registerMap.find(val) == registerMap.end()){
-                // values isn't in a register, so we can't use it to store the value
-                // instead, we use a special register for this purpose, load it into that one, then stoe from there
-                if(spillMap.find(val) == spillMap.end()){
-                    // TODO this can definitely happen currently, because of the phi issues
-                    THROW_TODO_X("spillXButStoreY: value to be stored not in register and not on stack");
-                }
-                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(spillMap[val].offset), irb.getInt8(3)}, "l");
-                SET_METADATA(load, memMemStoresRegister);
-                val = load; // replace y with the loaded value
-            }
             // offset is in doublewords, so multiply by 8 by shifting left by 3
             irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset), irb.getInt8(3)});
         }
@@ -3287,9 +3283,7 @@ namespace Codegen::RegAlloc{
         Register spillAndRemove(){
             auto valToSpill = sortedCache.back();
             auto whichReg = valToSpill.reg;
-            if(!valToSpill.noSpill){
-                spill(valToSpill.value);
-            }
+            spill(valToSpill.value);
 
             registerMap.erase(sortedCache.back().value);
             sortedCache.pop_back();
@@ -3299,9 +3293,10 @@ namespace Codegen::RegAlloc{
         const Register& assignReg(llvm::Value* val, Register& r){
             bool noSpill = false;
             if(auto inst = dyn_cast_if_present<llvm::CallInst>(val)){
-                // TODO set noSpill here if it's a materializing mov
+                // set noSpill here if it's a materializing mov
                 // at the moment all ARM_mov instructions are materializing, so this check suffices
-                if(inst->getCalledFunction()==instructionFunctions[ARM_mov]){
+                // or set noSpill if its a phi, because we don't want to spill phis
+                if(inst->getCalledFunction()==instructionFunctions[ARM_mov] || inst->hasMetadata("phi")){
                     noSpill = true;
                 }
             }

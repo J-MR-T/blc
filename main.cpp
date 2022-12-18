@@ -3273,7 +3273,7 @@ namespace Codegen::RegAlloc{
             auto whichReg = valToSpill.reg;
             spill(valToSpill.value);
 
-            registerMap.erase(sortedCache.back().value);
+            registerMap.erase(valToSpill.value);
             sortedCache.pop_back();
             return whichReg;
         }
@@ -3405,10 +3405,15 @@ namespace Codegen::RegAlloc{
             llvm::SmallPtrSet<llvm::PHINode*, 8> toHandle;
 
             for(auto& phi : phiNodes){
-                toHandle.insert(&phi);
-
                 auto val = phi.getIncomingValue(edgeNum);
                 auto otherPhi = llvm::dyn_cast_if_present<llvm::PHINode>(val);
+
+                if(otherPhi && otherPhi==&phi){
+                    // self-reference/edge, ignore
+                    continue;
+                }
+                toHandle.insert(&phi);
+
                 if(otherPhi && otherPhi->getParent() == phi.getParent()){
                     readBy[otherPhi].insert(&phi);
                     numReaders[otherPhi]++;
@@ -3450,8 +3455,9 @@ namespace Codegen::RegAlloc{
                 }
             }
 
-            if(toHandle.size() > 1){
-                DEBUGLOG("found cycle of length >=2") // cycles of length 1 can happen, but are simply ignored, because they would result in a load/store from/to the same stack slot
+            // prevent cycles of length 1 (self edges) by handling them before by not adding readBy/readers entries for them
+            if(toHandle.size() > 0){
+                DEBUGLOG("found cycle")
 
                 // cycle
                 // temporarily save one of the phi nodes in the special register
@@ -3464,10 +3470,18 @@ namespace Codegen::RegAlloc{
                 // handle chain until last element
                 while(toHandle.size()>1){
                     phi = *toHandle.begin();
+                    DEBUGLOG("Handling " << *phi << " numReaders: \n" << numReaders[phi]);
+                    //readers:
+#ifndef NDEBUG
+                    for(auto reader: readBy[phi]){
+                        DEBUGLOG("\treader: " << *reader);
+                    }
+#endif
 
                     if(numReaders[phi] == 0){
                         HANDLE_CHAIN_ELEMENT(phi);
                     }
+                    // TODO infinite loop here in llvmEuler.b
                 }
 
                 // last element gets assigned the special register
@@ -3484,6 +3498,8 @@ namespace Codegen::RegAlloc{
             phi.replaceAllUsesWith(load);
             phi.eraseFromParent();
         }
+
+        DEBUGLOG("done  with phi nodes");
     }
 
     void regallocFn(llvm::Function& f){

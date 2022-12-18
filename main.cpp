@@ -3135,6 +3135,13 @@ namespace Codegen::ISel{
 
 // REFACTOR maybe at some point instruction scheduling
 
+// HW 7: register allocation
+// Mostly working ARM register allocation (currently only using X0-X7, but could easily be extended to other caller saved registers), tests included in samples/
+// The only remaining bug I know of is that sometimes values are spilled in a block that is not dominated by the block in which the value was defined.
+//   By definition, this spill is unnecessary, as the fact that it is spilled in this block means, that its lifetime has already ended here, so a dirty fix would be to simply remove all of these uses, which are not dominated by their definition, in another pass.
+// 
+// I will probably rewrite this if I find the time and enegery, as I have learned a great deal here about how not to do this (for instance: Not doing liveness analysis was a well-considered tradeoff, that turned out to be not worth making, it just made everything harder and more inefficient)
+
 namespace Codegen::RegAlloc{
     // normal enum, because the int values are important and much more convenient
     enum Register{
@@ -3151,7 +3158,7 @@ namespace Codegen::RegAlloc{
     }
 
     Register phiCycleBreakRegister = X24;
-    Register memMemStoresRegister = X24;
+    Register memMemStoresRegister = X25;
 
     std::unordered_set<Register> initialFreeRegisters{
         Register::X0,
@@ -3167,7 +3174,6 @@ namespace Codegen::RegAlloc{
     struct AllocatedRegister{
         llvm::Value* value;
         const Register reg;
-        bool noSpill{false};
     };
 
     struct AllocatedStackslot{
@@ -3252,7 +3258,7 @@ namespace Codegen::RegAlloc{
             // a) value is not in a register, so we don't need to spill it
             //   or
             // b) noSpill is set (e.g. phis, materialized constants)
-            if(registerMap.find(val) == registerMap.end() || registerMap[val]->noSpill){
+            if(registerMap.find(val) == registerMap.end() || (llvm::isa<llvm::Instruction>(val) && llvm::dyn_cast<llvm::Instruction>(val)->hasMetadata("noSpill"))){
                 return;
             }
 
@@ -3279,17 +3285,15 @@ namespace Codegen::RegAlloc{
         }
 
         const Register& assignReg(llvm::Value* val, Register& r){
-            bool noSpill = false;
             if(auto inst = dyn_cast_if_present<llvm::CallInst>(val)){
                 // set noSpill here if it's a materializing mov
                 // at the moment all ARM_mov instructions are materializing, so this check suffices
                 // or set noSpill if its a phi, because we don't want to spill phis
                 if(inst->getCalledFunction()==instructionFunctions[ARM_mov] || inst->hasMetadata("phi")){
-                    noSpill = true;
+                    inst->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
                 }
             }
             sortedCache.emplace_front(AllocatedRegister{val, Register{r}});
-            sortedCache.front().noSpill = noSpill;
             registerMap[val] = sortedCache.begin();
             return sortedCache.cbegin()->reg;
         }
@@ -3323,6 +3327,8 @@ namespace Codegen::RegAlloc{
                 auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset), irb.getInt8(3)}, "l");
                 auto reg = registerForNewValue(val); // get a register for the value, this also caches it
                 SET_METADATA(load, reg); // set the register metadata on the load instruction
+                // propagate noSpill
+                if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)) if(inst->hasMetadata("noSpill")) load->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
                 // instead of RAU of the value with the load, return it and replace the val in the use that this is needed for with load in the caller
                 return {reg, load};
             }
@@ -3495,6 +3501,7 @@ namespace Codegen::RegAlloc{
             regLRU.irb.SetInsertPoint(phi.getParent()->getFirstNonPHI());
             auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[&phi].offset) , regLRU.irb.getInt8(3)}, "phi_" + phi.getName());
             load->setMetadata("phi", llvm::MDNode::get(ctx, {}));
+            load->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
             phi.replaceAllUsesWith(load);
             phi.eraseFromParent();
         }
@@ -3567,6 +3574,12 @@ namespace Codegen::RegAlloc{
                         regLRU.handleFunctionCall(call);
                     }else{
                         regLRU.irb.SetInsertPoint(call);
+
+                        if(call->arg_size()>0) if(auto maybePhi = llvm::dyn_cast_if_present<llvm::Instruction>(call->getArgOperand(0))){
+                            if(maybePhi->getMetadata("noSpill")){
+                                call->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
+                            }
+                        }
 
                         // loads for phis dont need seperate loads for their arguments, those are already correct
                         if(!call->hasMetadata("phi")){

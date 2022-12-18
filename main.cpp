@@ -56,7 +56,7 @@ using std::unique_ptr;
 #define THROW_TODO_X(x)\
     throw std::runtime_error("TODO(Line " STRINGIZE_MACRO(__LINE__) "): " x)
 
-// search for "HW 6" to find the start of the new code
+// search for "HW 7" to find the start of the new code
 
 
 struct Token{
@@ -474,7 +474,6 @@ class UnexpectedTokenException :  public ParsingException {
             return std::count(prog.begin(), prog.end(), '\n') +1;
         }
         // this should work on windows too, because '\r\n' also contains '\n', but honestly if windows users have wrong line numbers in their errors, so be it :P
-        // TODO segfault
         return std::count(prog.begin(), prog.begin()+progI, '\n')+1;
     }
 
@@ -2283,7 +2282,7 @@ namespace Codegen::ISel{
         llvm::Instruction::Call,
         llvm::Instruction::Unreachable,
         llvm::Instruction::PHI,
-        llvm::Instruction::Alloca, // think about this again
+        llvm::Instruction::Alloca, // TODO think about this again
     };
 
     /// for useful matching the patterns need to be sorted by totalSize (descending) here. For this simple isel, this is just done by hand
@@ -3169,37 +3168,26 @@ namespace Codegen::RegAlloc{
         llvm::Value* value;
         const Register reg;
         bool noSpill{false};
-
-        // TODO maybe remove if unnecessary
-        class Hash{
-            public:
-            size_t operator()(const AllocatedRegister& x) const{
-                return std::hash<llvm::Value*>()(x.value);
-            }
-        };
     };
 
     struct AllocatedStackslot{
         llvm::Value* value;
         /// offset from base of spill allocation area, but in (ARM) doublewords, i.e. offset 2 means starting at byte 16
         int offset;
+    };
 
-        // TODO maybe remove if unnecessary
-        class Hash{
-            public:
-            size_t operator()(const AllocatedStackslot& x) const{
-                return std::hash<llvm::Value*>()(x.value);
-            }
-        };
+    std::unordered_set<unsigned> skippableTypes{
+        llvm::Instruction::Ret,
+        llvm::Instruction::Br,
+        llvm::Instruction::Unreachable,
+        llvm::Instruction::Alloca, // TODO think about this again
     };
 
     /// as a macro, because as a function it doesn't work, because setMetadata is protected
 #define SET_METADATA(val, reg)                                                               \
-        (val)->setMetadata("reg", llvm::MDNode::get(ctx,                                       \
+        (val)->setMetadata("reg", llvm::MDNode::get(ctx,                                     \
             {llvm::ValueAsMetadata::get(llvm::ConstantInt::get(i64, static_cast<int>(reg)))} \
         ));
-
-    // TODO does the LRU even work with loops? if values are used from the loop, they will be used again, so they should not be evicted and stuff like that?
 
     // number of registers available for "general purpose" use, this also excludes registers used for special things, such as phi cycle breaks
     template<int K>
@@ -3369,7 +3357,7 @@ namespace Codegen::RegAlloc{
                 SET_METADATA(load, reg++);
             }
 
-            // TODO test this is correct (it should at least always work, call always has at least a terminator following it)
+            // test this is correct (it should at least always work, call always has at least a terminator following it)
             irb.SetInsertPoint(call->getNextNode());
 
             // return value into X0
@@ -3384,7 +3372,6 @@ namespace Codegen::RegAlloc{
     };
 
     void handlePhiChainsCycles(RegLRU<8>& regLRU, llvm::iterator_range<llvm::BasicBlock::phi_iterator> phiNodes){
-        // TODO materializing mov for PHIs
         if(phiNodes.begin() == phiNodes.end()){
             return;
         }
@@ -3446,7 +3433,6 @@ namespace Codegen::RegAlloc{
             instructionFunctions[ARM_PSEUDO_str],                                                                                                         \
             {phi->getIncomingValue(edgeNum), regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset), regLRU.irb.getInt8(3)});          \
     toHandle.erase(phi);                                                                                                                                  \
-    /* TODO right way around? */                                                                                                                          \
     for(auto reader: readBy[phi]){                                                                                                                        \
         numReaders[reader]--;                                                                                                                             \
     }
@@ -3585,15 +3571,16 @@ namespace Codegen::RegAlloc{
                         regLRU.tryRefer(call);
                         SET_METADATA(call, regLRU.registerMap[call]->reg)
                     }
-                }else{
-                    if(llvm::isa<llvm::AllocaInst>(inst) || llvm::isa<llvm::BranchInst>(inst) || llvm::isa<llvm::ReturnInst>(inst) || llvm::isa<llvm::UnreachableInst>(inst)){
-                        // TODO do this nicer
-                        continue;
-                    }else{
-                        DEBUGLOG("cannot handle instruction " << inst)
-                        THROW_TODO;
-                    }
                 }
+#ifndef NDEBUG
+                else{
+                    if(llvm::isa<llvm::AllocaInst>(inst) || llvm::isa<llvm::BranchInst>(inst) || llvm::isa<llvm::ReturnInst>(inst) || llvm::isa<llvm::UnreachableInst>(inst)){
+                        continue;
+                    }
+                    DEBUGLOG("cannot handle instruction " << inst)
+                    THROW_TODO;
+                }
+#endif
             }
         }
     }
@@ -3613,7 +3600,7 @@ namespace Codegen::RegAlloc{
     }
 
     
-}
+} // namespace Codegen::RegAlloc
 
 
 int main(int argc, char *argv[])

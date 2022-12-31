@@ -1,5 +1,5 @@
 #include <iostream>
-#include <iostream>
+#include <cassert>
 #include <string>
 #include <array>
 #include <algorithm>
@@ -1383,6 +1383,11 @@ namespace Codegen{
         return llvm::dyn_cast<llvm::MDString>(inst->getMetadata(mdName)->getOperand(0))->getString();
     }
 
+    void            llvmSetStringMetadata(llvm::Instruction* inst, llvm::StringRef mdName, llvm::StringRef val){
+        llvm::MDNode* md = llvm::MDNode::get(ctx, llvm::MDString::get(ctx, val));
+        inst->setMetadata(mdName, md);
+    }
+
     string llvmPredicateToARM(llvm::ICmpInst::Predicate pred){
         switch(pred){
             // we only use 6 of these:
@@ -2402,7 +2407,6 @@ namespace Codegen{
         ARM_eor,
 
         ARM_mov,
-        ARM_mov_shift,
 
         ARM_ldr,
         ARM_ldr_sb,
@@ -2418,6 +2422,7 @@ namespace Codegen{
         ARM_b_cond,
         ARM_b,
         ARM_b_cbnz,
+        ARM_b_cbz,
 
         ZExt_handled_in_Reg_Alloc,
     };
@@ -2479,7 +2484,6 @@ namespace Codegen{
 
         // mov
         CREATE_INST_FN(ARM_mov,       i64, i64),
-        CREATE_INST_FN(ARM_mov_shift, i64, i64,  i64),
 
         // memory access
         // (with varargs to be able to simulate the different addressing modes)
@@ -2495,9 +2499,10 @@ namespace Codegen{
         CREATE_INST_FN_VARARGS(ARM_PSEUDO_str, voidTy),
 
         // control flow/branches
-        CREATE_INST_FN_VARARGS(ARM_b_cond, llvm::Type::getInt1Ty(ctx)),
-        CREATE_INST_FN_VARARGS(ARM_b,      voidTy),
-        CREATE_INST_FN(ARM_b_cbnz,         llvm::Type::getInt1Ty(ctx),  i64),
+        CREATE_INST_FN(ARM_b,              voidTy),
+        CREATE_INST_FN(ARM_b_cond,         llvm::Type::getInt1Ty(ctx), i64),
+        CREATE_INST_FN(ARM_b_cbnz,         llvm::Type::getInt1Ty(ctx), i64),
+        CREATE_INST_FN(ARM_b_cbz,          llvm::Type::getInt1Ty(ctx), i64),
 
         // 'metadata' calls
         CREATE_INST_FN_VARARGS(ZExt_handled_in_Reg_Alloc, i64),
@@ -3000,12 +3005,20 @@ namespace Codegen::ISel{
                 auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
 
                 auto cmp = irb.CreateCall(instructionFunctions[ARM_cmp], {OP_N_MAT(innerCond,0), OP_N_MAT(innerCond,1)});
-                auto call = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
-                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                irb.CreateCondBr(call, trueBlock, falseBlock);
+                auto brTrue = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
+                llvmSetStringMetadata(brTrue, "pred", predStr);
+                llvmSetStringMetadata(brTrue, "label", trueBlock->getName());
 
-                call->setMetadata("pred", llvm::MDNode::get(ctx, llvm::MDString::get(ctx, predStr)));
-                return call;
+                pred = llvm::ICmpInst::getInversePredicate(pred);
+                predStr = llvmPredicateToARM(pred);
+                auto brFalse = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
+                llvmSetStringMetadata(brTrue, "pred", predStr);
+                llvmSetStringMetadata(brTrue, "label", falseBlock->getName());
+
+                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                irb.CreateCondBr(brTrue, trueBlock, falseBlock);
+
+                return brTrue;
             },
             llvm::Instruction::Br, // conditional branch after 'normal' comparison
             {
@@ -3034,10 +3047,14 @@ namespace Codegen::ISel{
                 auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
                 auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
 
-                auto call = irb.CreateCall(instructionFunctions[ARM_b_cbnz], {condInner});
-                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                irb.CreateCondBr(call, trueBlock, falseBlock);
-                return call;
+                auto cbnz = irb.CreateCall(instructionFunctions[ARM_b_cbnz], {condInner});
+                llvmSetStringMetadata(cbnz, "label", trueBlock->getName());
+                auto cbz = irb.CreateCall(instructionFunctions[ARM_b_cbz], {condInner});
+                llvmSetStringMetadata(cbz, "label", falseBlock->getName());
+
+                // reinsert the branch (with its operand being the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
+                irb.CreateCondBr(cbnz, trueBlock, falseBlock);
+                return cbnz;
             },
             llvm::Instruction::Br,
             {
@@ -3049,12 +3066,42 @@ namespace Codegen::ISel{
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb) -> llvm::Value* {
                 auto instr = dyn_cast<llvm::BranchInst>(&*irb.GetInsertPoint());
+                // special case: through constant folding, this normally only unconditional branch can be matched by a conditional branch, with an i1 constant (true/false) as its condition
+                // -> replace it with an unconditional branch
+                if(instr->isConditional()){
+                    auto cond = instr->getCondition();
+
+                    assert(llvm::isa<llvm::ConstantInt>(cond));
+
+                    auto trueBlock = instr->getSuccessor(0);
+                    auto falseBlock = instr->getSuccessor(1);
+
+                    auto br = irb.CreateCall(instructionFunctions[ARM_b], {});
+                    if(llvm::dyn_cast<llvm::ConstantInt>(cond)->getSExtValue() == 0){
+                        llvmSetStringMetadata(br, "label", falseBlock->getName());
+                        irb.CreateBr(falseBlock);
+                        return br;
+                    } else {
+                        llvmSetStringMetadata(br, "label", trueBlock->getName());
+                        irb.CreateBr(trueBlock);
+                        return br;
+                    }
+                }
+
                 // cannot be conditional branch, because that always has an icmp NE as its condition, thats matched before
-                return irb.CreateCall(instructionFunctions[ARM_b], {OP_N(instr,0)});
+                DEBUGLOG("br: " << *instr);
+                assert(instr->isUnconditional() && "unconditional branch expected");
+
+                auto bb = instr->getSuccessor(0);
+
+                auto br = irb.CreateCall(instructionFunctions[ARM_b], {});
+                llvmSetStringMetadata(br, "label", bb->getName());
+
+                irb.CreateBr(bb);
+                return br;
             },
             llvm::Instruction::Br, 
-            {},
-            true
+            {}
         ),
 
         // icmp (also almost all possible ZExts, they're (almost) exclusively used for icmps, only once for a phi in the short circuiting logical ops)
@@ -3069,7 +3116,7 @@ namespace Codegen::ISel{
                 irb.CreateCall(instructionFunctions[ARM_cmp], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
 
                 auto call = irb.CreateCall(instructionFunctions[ARM_csel], {MAT_CONST(irb.getInt64(1)), XZR});
-                call->setMetadata("pred", llvm::MDNode::get(ctx, llvm::MDString::get(ctx, predStr)));
+                llvmSetStringMetadata(call, "pred", predStr);
                 return call;
             },
             llvm::Instruction::ZExt,
@@ -3088,7 +3135,7 @@ namespace Codegen::ISel{
                 irb.CreateCall(instructionFunctions[ARM_cmp], {OP_N_MAT(icmpInstr, 0), OP_N_MAT(icmpInstr, 1)});
 
                 auto call = irb.CreateCall(instructionFunctions[ARM_csel_i1], {MAT_CONST(irb.getInt64(1)), XZR});
-                call->setMetadata("pred", llvm::MDNode::get(ctx, llvm::MDString::get(ctx, predStr)));
+                llvmSetStringMetadata(call, "pred", predStr);
                 return call;
             },
             llvm::Instruction::ICmp,
@@ -3244,7 +3291,7 @@ namespace Codegen::RegAlloc{
         AllocatedStackslot& allocateStackslot(llvm::Value* val){
             int offset = spillMap.size();
             spillMap[val] = AllocatedStackslot{val, offset};
-            // rewrite spill allocation size (add 8)
+            // rewrite spill allocation size (add 1)
             // REFACTOR: this could be inserted into the IR after having finished register allocation for this function
             spillsAllocation->setOperand(0,
                 llvm::ConstantExpr::getAdd(
@@ -3280,8 +3327,8 @@ namespace Codegen::RegAlloc{
                 // stack slot does not exist, create it
                 offset = allocateStackslot(val).offset;
             }
-            // offset is in doublewords, so multiply by 8 by shifting left by 3
-            irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset), irb.getInt8(3)});
+            // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+            irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset << 3)});
         }
 
         Register spillAndRemove(){
@@ -3333,8 +3380,8 @@ namespace Codegen::RegAlloc{
             }else{
                 // not in cache -> has to be on the stack, load it
                 int offset = spillMap[val].offset;
-                // offset is in doublewords, so multiply by 8 by shifting left by 3
-                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset), irb.getInt8(3)}, "l");
+                // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
                 auto reg = registerForNewValue(val); // get a register for the value, this also caches it
                 SET_METADATA(load, reg); // set the register metadata on the load instruction
                 // propagate noSpill
@@ -3368,8 +3415,8 @@ namespace Codegen::RegAlloc{
                 }
 
                 int offset = spillMap[arg].offset;
-                // offset is in doublewords, so multiply by 8 by shifting left by 3
-                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset), irb.getInt8(3)}, "l");
+                // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
                 SET_METADATA(load, reg++);
             }
 
@@ -3478,7 +3525,7 @@ namespace Codegen::RegAlloc{
                 // cycle
                 // temporarily save one of the phi nodes in the special register
                 auto phi = *toHandle.begin();
-                auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset) , regLRU.irb.getInt8(3)}, "phiCycleBreak");
+                auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset << 3)}, "phiCycleBreak");
                 auto firstStore = load;
                 numReaders[phi]--;
                 SET_METADATA(load, phiCycleBreakRegister);
@@ -3501,14 +3548,14 @@ namespace Codegen::RegAlloc{
 
                 // last element gets assigned the special register
                 phi = *toHandle.begin();
-                regLRU.irb.CreateCall(instructionFunctions[ARM_str], {firstStore, regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset) , regLRU.irb.getInt8(3)});
+                regLRU.irb.CreateCall(instructionFunctions[ARM_str], {firstStore, regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset << 3)});
             }
         }
 
         // replace all phis with loads from the stack
         for(auto& phi : llvm::make_early_inc_range(phiNodes)){
             regLRU.irb.SetInsertPoint(phi.getParent()->getFirstNonPHI());
-            auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[&phi].offset) , regLRU.irb.getInt8(3)}, "phi_" + phi.getName());
+            auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[&phi].offset << 3)}, "phi_" + phi.getName());
             load->setMetadata("phi", llvm::MDNode::get(ctx, {}));
             load->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
             phi.replaceAllUsesWith(load);

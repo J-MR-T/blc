@@ -2301,7 +2301,7 @@ namespace Codegen::ISel{
         llvm::Instruction::Call,
         llvm::Instruction::Unreachable,
         llvm::Instruction::PHI,
-        llvm::Instruction::Alloca, // TODO think about this again
+        llvm::Instruction::Alloca,
     };
 
     /// for useful matching the patterns need to be sorted by totalSize (descending) here. For this simple isel, this is just done by hand
@@ -2764,19 +2764,6 @@ namespace Codegen::ISel{
         TWO_OPERAND_INSTR_PATTERN(Xor, ARM_eor)
 
         // memory
-
-        // alloca
-        // TODO i think this should just be handled later when allocating the stackframe
-        //Pattern::make_root(
-        //    [](llvm::IRBuilder<>& irb) -> llvm::Value* {
-        //        auto stackVar = irb.CreateCall(instructionFunctions[ARM_sub_SP], {irb.getInt64(8)}); // always exactly 8
-        //        currentFunctionBytesToFreeAtEnd+=8;
-        //
-        //        return stackVar;
-        //    },
-        //    llvm::Instruction::Alloca // always allocates an i64 in our case
-        //                               // there is always a store that uses this alloca, but to not delete/replace it, we match the alloca itself
-        //),
 
         // sign extends can only happen after loadsA
         // truncation can only happen before stores
@@ -3243,7 +3230,7 @@ namespace Codegen::RegAlloc{
         llvm::Instruction::Ret,
         llvm::Instruction::Br,
         llvm::Instruction::Unreachable,
-        llvm::Instruction::Alloca, // TODO think about this again
+        llvm::Instruction::Alloca,
     };
 
     /// as a macro, because as a function it doesn't work, because setMetadata is protected

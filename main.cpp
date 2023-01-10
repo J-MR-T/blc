@@ -3239,57 +3239,6 @@ namespace Codegen::RegAlloc{
             {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64, static_cast<int>(reg)))} \
         ));
 
-    // abstract class as specification for register allocation, for class to "manage" registers with a certain technique
-    class RegisterAllocator{
-    public:
-        /// always assumes the insertion point is at the correct point for spill loads/stores
-        llvm::IRBuilder<>& irb;
-
-        virtual ~RegisterAllocator() = default;
-
-        // copy semantics
-        RegisterAllocator(const RegisterAllocator& copy) = delete;
-        RegisterAllocator& operator=(const RegisterAllocator& copy) = delete;
-
-        // move semantics
-        RegisterAllocator(RegisterAllocator&& other);
-        RegisterAllocator& operator=(RegisterAllocator&& other);
-
-        RegisterAllocator(llvm::IRBuilder<>& irb): irb{irb} {}
-
-        /// allocates a register for the given value
-        virtual AllocatedRegister& allocate(llvm::Instruction* inst);
-
-        /// gets the register allocated for the given value, if its currently on the stack, it will be spill loaded into a register
-        virtual AllocatedRegister& get(llvm::Value* val);
-
-        /// find all arguments necessary for instruction. 
-        /// and if necessary load them into a register (if this is not already guaranteed by the strategy used)
-        /// annotates arguments with "reg" metadata if necessary
-        /// defers to loadFunctionCall for calls
-        virtual void loadAndAnnotateArguments(llvm::CallInst* inst);
-
-        /// remove this register from the "management" of this class -> if necessary its contents get spilled, removed from respective datastructures etc.
-        virtual void freeRegister(Register& reg);
-
-        // should be used internally, but is not necessarily part of public API (change if necessary)
-    private:
-        /// get function calls arguments and load them into the correct registers/stack slots (X0-X7, then stack on ARM)
-        virtual void loadFunctionCall(llvm::CallInst* call);
-
-        /// allocate a stackslot for a value, if it doesn't already have one
-        virtual AllocatedRegister allocateStackslot(llvm::Value* val);
-
-        /// load a value *known to be on the stack*
-        /// behavior is undefined, if the value does not reside on the stack
-        virtual AllocatedRegister& spillLoad();
-
-        /// store a value *known to be in a register*
-        /// behavior is undefined, if the value does not reside in a register
-        virtual AllocatedStackslot& spillStore();
-
-    };
-
     // number of registers available for "general purpose" use, this also excludes registers used for special things, such as phi cycle breaks
     template<int K>
     class RegLRU{

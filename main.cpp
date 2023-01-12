@@ -1186,20 +1186,21 @@ namespace ArgParse{
     
     // struct for all possible arguments
     const struct {
-        const Arg help{"h", "help", 0, "Show this help message and exit",  false, true};
-        const Arg input{"i", "input", 1, "Input file",  true, false};
-        const Arg dot{"d", "dot", 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)", false, true};
-        const Arg output{"o", "output", 2, "Output file for AST (requires -p)", false, false};
-        const Arg print{"p", "print", 0, "Print AST (-d for DOT format highly recommended instead)", false, true};
-        const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it", false, true};
-        const Arg url{"u", "url", 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser (requires -d or -p)", false, true};
-        const Arg nosemantic{"n", "nosemantic", 0, "Don't run semantic analysis on the AST", false, true};
-        const Arg benchmark{"b", "benchmark", 0, "Time execution time for parsing and semantic analysis and print memory footprint", false, true};
-        const Arg iterations{"",  "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)", false, false};
-        const Arg llvm{"l", "llvm", 0, "Output LLVM IR (mutually exclusive with p/d/u), by default to stdout, except if an output file is specified using -o", false, true};
-        const Arg nowarn{"w", "nowarn", 0, "Do not generate warnings during the LLVM codegeneration phase (has no effect unless -l is specified)", false, true};
-        const Arg isel{"s", "isel", 0, "Run the custom ARM instruction selector (has no effect unless -l is specified)", false, true};
-        const Arg regalloc{"r", "regalloc", 0, "Run the custom ARM register allocator (has no effect unless -l and -s are specified)", false, true};
+        const Arg help{      "h", "help"      , 0, "Show this help message and exit"                                                                     , false, true};
+        const Arg input{     "i", "input"     , 1, "Input file"                                                                                          ,  true, false};
+        const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)"           , false, true};
+        const Arg output{    "o", "output"    , 2, "Output file for AST (requires -p)"                                                                   , false, false};
+        const Arg print{     "p", "print"     , 0, "Print AST (-d for DOT format highly recommended instead)"                                            , false, true};
+        const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
+        const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
+        const Arg nosemantic{"n", "nosemantic", 0, "Don't run semantic analysis on the AST"                                                              , false, true};
+        const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
+        const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
+        const Arg llvm{      "l", "llvm"      , 0, "Output LLVM IR (mutually exclusive with p/d/u)"                                                      , false, true};
+        const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
+        const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM IR"                                                          , false, true};
+        const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM IR"                                                            , false, true};
+        const Arg asmout{    "a", "asm"       , 0, "Output (ARM-) assembly"                                                                              , false, true};
 
 
         const Arg sentinel{"", "", 0, "", false, false};
@@ -1370,16 +1371,8 @@ namespace Codegen{
         }
     }
 
-#ifndef NDEBUG
-    string stringizeVal(llvm::Value* val){
-        string buf;
-        llvm::raw_string_ostream ss{buf};
-        ss << *val;
-        return buf;
-    }
-#endif
-
     llvm::StringRef llvmGetStringMetadata(llvm::Instruction* inst, llvm::StringRef mdName){
+        assert(inst->hasMetadata(mdName) && ("call must have \"" + mdName + "\" metadata").str().c_str());
         return llvm::dyn_cast<llvm::MDString>(inst->getMetadata(mdName)->getOperand(0))->getString();
     }
 
@@ -2058,18 +2051,18 @@ namespace Codegen{
         }
     }
 
-    bool generate(AST& ast, llvm::raw_ostream& out){
+    bool generate(AST& ast, llvm::raw_ostream* out){
         genRoot(ast.root);
 
 
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
-        if(moduleIsBroken){
-            moduleUP->print(llvm::errs(), nullptr);
-        }else{
-            moduleUP->print(out, nullptr);
-        }
-        if(warningsGenerated){
-            llvm::errs() << "Warnings were generated during code generation, please check the output for more information\n";
+        if(out){
+            moduleUP->print(*out, nullptr);
+
+            if(moduleIsBroken) 
+                llvm::errs() << "Generating LLVM IR failed :(.\nIndividual errors displayed above\n";
+            else if(warningsGenerated)
+                llvm::errs() << "Warnings were generated during code generation, please check the output for more information\n";
         }
         return !moduleIsBroken;
     }
@@ -2418,6 +2411,7 @@ namespace Codegen{
         ARM_str32_h,
 
         ARM_PSEUDO_str, // for stores which don't know what register they're storing from yet
+        ARM_PSEUDO_addr_computation, // specifically to handle ptrtoint scenarios, where we want to use a pointer like an int, this needs a register etc. 
 
         ARM_b_cond,
         ARM_b,
@@ -2482,8 +2476,8 @@ namespace Codegen{
         CREATE_INST_FN(ARM_orr,      i64, i64, i64),
         CREATE_INST_FN(ARM_eor,      i64, i64, i64), // XOR
 
-        // mov
-        CREATE_INST_FN(ARM_mov,       i64, i64),
+        // mov (varargs to accept both i64 and i1)
+        CREATE_INST_FN_VARARGS(ARM_mov,       i64),
 
         // memory access
         // (with varargs to be able to simulate the different addressing modes)
@@ -2497,6 +2491,7 @@ namespace Codegen{
         CREATE_INST_FN_VARARGS(ARM_str32_h,  voidTy),
 
         CREATE_INST_FN_VARARGS(ARM_PSEUDO_str, voidTy),
+        CREATE_INST_FN_VARARGS(ARM_PSEUDO_addr_computation, i64),
 
         // control flow/branches
         CREATE_INST_FN(ARM_b,              voidTy),
@@ -2964,11 +2959,11 @@ namespace Codegen::ISel{
             }
         ),
 
-        // ptr to int, just remove it
+        // ptr to int, can't just remove it, because we need to make the address computation
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb) -> llvm::Value* {
                 auto instr = &*irb.GetInsertPoint();
-                return OP_N_MAT(instr,0);
+                return irb.CreateCall(instructionFunctions[ARM_PSEUDO_addr_computation], {OP_N_MAT(instr,0)});
             },
             llvm::Instruction::PtrToInt,
             {}
@@ -2988,24 +2983,32 @@ namespace Codegen::ISel{
                 auto pred       = innerCond->getSignedPredicate();
                 auto predStr    = llvmPredicateToARM(pred);
 
-                auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
-                auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
+                // true and false block are reversed, because we have the negated (ne) condition
+                auto falseBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
+                auto trueBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
 
                 auto cmp = irb.CreateCall(instructionFunctions[ARM_cmp], {OP_N_MAT(innerCond,0), OP_N_MAT(innerCond,1)});
-                auto brTrue = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
-                llvmSetStringMetadata(brTrue, "pred", predStr);
-                llvmSetStringMetadata(brTrue, "label", trueBlock->getName());
 
-                pred = llvm::ICmpInst::getInversePredicate(pred);
-                predStr = llvmPredicateToARM(pred);
-                auto brFalse = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
-                llvmSetStringMetadata(brTrue, "pred", predStr);
-                llvmSetStringMetadata(brTrue, "label", falseBlock->getName());
+                // fallthrough
+                if(irb.GetInsertBlock()->getNextNode() != trueBlock){
+                    auto brTrue = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
+                    llvmSetStringMetadata(brTrue, "pred", predStr);
+                    llvmSetStringMetadata(brTrue, "label", trueBlock->getName());
+                    DEBUGLOG("on true branch: " << *brTrue);
+                }
 
-                // reinsert the branch (with its operand as the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                irb.CreateCondBr(brTrue, trueBlock, falseBlock);
+                // fallthrough
+                if(irb.GetInsertBlock()->getNextNode() != falseBlock){
+                    auto brFalse = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
+                    pred = llvm::ICmpInst::getInversePredicate(pred);
+                    predStr = llvmPredicateToARM(pred);
+                    llvmSetStringMetadata(brFalse, "pred", predStr);
+                    llvmSetStringMetadata(brFalse, "label", falseBlock->getName());
+                    DEBUGLOG("on false branch: " << *brFalse);
+                }
 
-                return brTrue;
+                // reinsert a branch to keep llvm happy and the block well formed, this is ignored later
+                return irb.CreateCondBr(irb.getFalse(), trueBlock, falseBlock);
             },
             llvm::Instruction::Br, // conditional branch after 'normal' comparison
             {
@@ -3031,17 +3034,26 @@ namespace Codegen::ISel{
                 auto instr      = &*irb.GetInsertPoint();
                 auto cond       = llvm::dyn_cast<llvm::ICmpInst>(OP_N(instr,0));
                 auto condInner  = OP_N_MAT(cond,0);
+
+                // TODO maybe here the condition is also reversed?
                 auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
                 auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
 
-                auto cbnz = irb.CreateCall(instructionFunctions[ARM_b_cbnz], {condInner});
-                llvmSetStringMetadata(cbnz, "label", trueBlock->getName());
-                auto cbz = irb.CreateCall(instructionFunctions[ARM_b_cbz], {condInner});
-                llvmSetStringMetadata(cbz, "label", falseBlock->getName());
 
-                // reinsert the branch (with its operand being the call), this is an exception to the rule, it cannot be removed, it might seem stupid, but its only a consequence of modeling acutal arm assembly in llvm
-                irb.CreateCondBr(cbnz, trueBlock, falseBlock);
-                return cbnz;
+                // fallthrough
+                if(irb.GetInsertBlock()->getNextNode() != trueBlock){
+                    auto cbnz = irb.CreateCall(instructionFunctions[ARM_b_cbnz], {condInner});
+                    llvmSetStringMetadata(cbnz, "label", trueBlock->getName());
+                }
+
+                // fallthrough
+                if(irb.GetInsertBlock()->getNextNode() != falseBlock){
+                    auto cbz = irb.CreateCall(instructionFunctions[ARM_b_cbz], {condInner});
+                    llvmSetStringMetadata(cbz, "label", falseBlock->getName());
+                }
+
+                // reinsert a branch to keep llvm happy and the block well formed, this is ignored later
+                return irb.CreateCondBr(irb.getFalse(), trueBlock, falseBlock);
             },
             llvm::Instruction::Br,
             {
@@ -3063,14 +3075,16 @@ namespace Codegen::ISel{
                     auto trueBlock = instr->getSuccessor(0);
                     auto falseBlock = instr->getSuccessor(1);
 
-                    auto br = irb.CreateCall(instructionFunctions[ARM_b], {});
-                    if(llvm::dyn_cast<llvm::ConstantInt>(cond)->getSExtValue() == 0){
-                        llvmSetStringMetadata(br, "label", falseBlock->getName());
-                        irb.CreateBr(falseBlock);
-                        return br;
-                    } else {
-                        llvmSetStringMetadata(br, "label", trueBlock->getName());
-                        irb.CreateBr(trueBlock);
+                    auto branchTo = llvm::dyn_cast<llvm::ConstantInt>(cond)->isZero() ? falseBlock : trueBlock;
+
+                    // make use of fallthrough
+                    if(irb.GetInsertBlock()->getNextNode() == branchTo){
+                        return irb.CreateBr(branchTo);
+                    }else{
+                        // no fallthrough possible
+                        auto br = irb.CreateCall(instructionFunctions[ARM_b], {});
+                        llvmSetStringMetadata(br, "label", branchTo->getName());
+                        irb.CreateBr(branchTo);
                         return br;
                     }
                 }
@@ -3081,11 +3095,15 @@ namespace Codegen::ISel{
 
                 auto bb = instr->getSuccessor(0);
 
-                auto br = irb.CreateCall(instructionFunctions[ARM_b], {});
-                llvmSetStringMetadata(br, "label", bb->getName());
+                if(irb.GetInsertBlock()->getNextNode() == bb){
+                    return irb.CreateBr(bb);
+                }else{
+                    auto br = irb.CreateCall(instructionFunctions[ARM_b], {});
+                    llvmSetStringMetadata(br, "label", bb->getName());
 
-                irb.CreateBr(bb);
-                return br;
+                    irb.CreateBr(bb);
+                    return br;
+                }
             },
             llvm::Instruction::Br, 
             {}
@@ -3145,7 +3163,7 @@ namespace Codegen::ISel{
         ),
     };
 
-    void doISel(llvm::raw_ostream& out){
+    void doISel(llvm::raw_ostream* out){
         // add metadata to instr functions
         for(auto& instr : instructionFunctions){
             instr.second->setMetadata("arm_instruction_function", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64,std::to_underlying(instr.first)))}));
@@ -3171,9 +3189,11 @@ namespace Codegen::ISel{
             }
         }
 
-        moduleUP->print(out, nullptr);
-        bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
-        if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
+        if(out){
+            moduleUP->print(*out, nullptr);
+            bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
+            if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
+        }
     }
 } // namespace Codegen::ISel
 
@@ -3301,7 +3321,7 @@ namespace Codegen::RegAlloc{
             );
         }
 
-        void spill(llvm::Value* val){
+        void spillStore(llvm::Value* val){
             // Dont need to spill if
             // a) value is not in a register, so we don't need to spill it
             //   or
@@ -3327,11 +3347,12 @@ namespace Codegen::RegAlloc{
             irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset << 3)});
         }
 
-        Register spillAndRemove(){
+        Register freeAnyRegister(){
             auto valToSpill = sortedCache.back();
             auto whichReg = valToSpill.reg;
-            spill(valToSpill.value);
+            spillStore(valToSpill.value);
 
+            freeRegisters.insert(whichReg);
             registerMap.erase(valToSpill.value);
             sortedCache.pop_back();
             return whichReg;
@@ -3356,7 +3377,7 @@ namespace Codegen::RegAlloc{
             Register whichReg;
             if(sortedCache.size() == K){
                 // cache is full, spill the least recently used value
-                whichReg = spillAndRemove();
+                whichReg = freeAnyRegister();
             }else{
                 // cache is not full, use a free register
                 auto it = freeRegisters.begin();
@@ -3394,7 +3415,7 @@ namespace Codegen::RegAlloc{
 
             // spill and remove all registers from cache
             while(sortedCache.size() > 0){
-                spillAndRemove();
+                freeAnyRegister();
             }
 
             // REFACTOR: use values from registers if possible
@@ -3441,8 +3462,10 @@ namespace Codegen::RegAlloc{
 
         // allocate a stack slot for each phi
         unsigned phiCounter{0};
+        unsigned originalSize = regLRU.spillMap.size();
         for(auto& phi : phiNodes){
-            regLRU.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(phiCounter)}; // TODO this should be regLRU.spillMap.size()+phiCounter, but that breaks simplemain.b, so analyze that
+            //regLRU.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(phiCounter)}; // TODO this should be regLRU.spillMap.size()+phiCounter, but that breaks simplemain.b, so analyze that
+            regLRU.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(originalSize+phiCounter)};
             phiCounter++;
         }
         regLRU.enlargeSpillsAllocation(phiCounter);
@@ -3660,8 +3683,11 @@ namespace Codegen::RegAlloc{
                             SET_METADATA(call, regLRU.registerMap[call]->reg)
                         }
                     }
+                } else if(auto alloca = llvm::dyn_cast_if_present<llvm::AllocaInst>(&inst)){
+                    // annotate it with noSpill (meaning if it is used as an arugment somewhere, it does not get spilled)
+                    alloca->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
                 } else {
-                    bool isIgnored = (llvm::isa<llvm::AllocaInst>(inst) || llvm::isa<llvm::BranchInst>(inst) || llvm::isa<llvm::ReturnInst>(inst) || llvm::isa<llvm::UnreachableInst>(inst));
+                    bool isIgnored = (llvm::isa<llvm::BranchInst>(inst) || llvm::isa<llvm::ReturnInst>(inst) || llvm::isa<llvm::UnreachableInst>(inst));
                     (void)isIgnored;
                     assert(isIgnored && "unhandled instruction type");
                 }
@@ -3688,9 +3714,474 @@ namespace Codegen::RegAlloc{
     
 } // namespace Codegen::RegAlloc
 
+namespace Codegen{
 
-int main(int argc, char *argv[])
-{
+    class AssemblyGen{
+        llvm::raw_ostream& out;
+
+        /// stores the offset from the framepointer for any alloca (resets with every call to emitFunction)
+        /// example: first alloca, only allocates 8 bytes, so it's at fp - 8, so we store -8 here
+        llvm::ValueMap<llvm::AllocaInst*, int> framePointerRelativeAddresses{};
+
+        llvm::Function* currentFunction = nullptr;
+
+    public:
+        AssemblyGen(llvm::raw_ostream* out): out(*out) {}
+
+
+
+        static string llvmNameToBlockLabel(llvm::Function* fn, llvm::StringRef name){
+            return ".L" + fn->getName().str() + "_" + name.str();
+        }
+
+        static string llvmNameToBlockLabel(llvm::Function* fn, llvm::CallInst* call){
+            return llvmNameToBlockLabel(fn, llvmGetStringMetadata(call, "label"));
+        }
+
+        /**
+          Stack layout:
+          |______...______|<- sp at start/CFA
+          |_link register_|
+          |_old frame ptr_|<- fp
+          |__local  vars__|
+          |______...______|
+
+          -> lr (x29) is at CFA - 8
+          -> fp (x30) is at CFA - 16
+          -> localvars[0] is at fp - 8 or CFA - 24
+          -> localvars[1] is at fp - 16 or CFA - 32
+          ...
+        */
+        void emitPrologue(llvm::Function* f){
+            out << "\t.global " << f->getName() << "\n";
+            out << "\t.type " << f->getName() << ", %function\n"; // arm asm seems to be %function, not @function
+            out << f->getName() << ":\n";
+            out << "\t.cfi_startproc\n";
+
+            out << "\tstp fp, lr, [sp, -16]!\n"; // still 16 byte aligned
+            // now sp is where we want fp to be
+            out << "\tmov fp, sp\n";
+            out << "\t.cfi_def_cfa fp, 16\n"; // x29 = fp, offset +16 to get to CFA
+            out << "\t.cfi_offset 29, -16\n"; // x29 = fp, offset -16 to get to fp
+            out << "\t.cfi_offset 30, -8\n";  // x30 = lr, offset -8  to get to lr
+        }
+
+        void emitEpilogue(llvm::Function* f){
+            out << "\t.size " << f->getName()  << ", .-" << f->getName() << "\n";
+            out << "\t.cfi_endproc\n\n";
+        }
+
+        /// emits a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
+        template<int bitwidth = 64>
+        void emitReg(llvm::CallInst* call){
+            int regNum = dyn_cast<llvm::ConstantAsMetadata>(call->getMetadata("reg")->getOperand(0))->getValue()->getUniqueInteger().getZExtValue();
+            // i hope the compiler optimizes this in the 2 generated cases, but i don't see why it wouldn't
+            if constexpr (bitwidth == 64){
+                out << "X" << regNum;
+            }else if(bitwidth == 32){
+                out << "W" << regNum;
+            }else{
+                static_assert(bitwidth == 64 || bitwidth == 32, "bitwidth for emitReg must be 32 or 64");
+            }
+        }
+
+        /// emits XZR, or a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
+        template<int bitwidth = 64>
+        void emitReg(llvm::Value* v){
+            // TODO lets hope this suffices (or even works...)
+            if(v == XZR){
+                out << "XZR";
+            }else if(auto param = llvm::dyn_cast<llvm::Argument>(v)){
+                out << "X" << param->getArgNo();
+            }else {
+                bool isCall = llvm::isa<llvm::CallInst>(v);
+                (void) isCall;
+                if(!isCall) {DEBUGLOG("not a call: " << *v)}
+                assert(isCall && "emitReg called with neither XZR, nor function parameter, nor call");
+                emitReg<bitwidth>(llvm::dyn_cast_if_present<llvm::CallInst>(v));
+            }
+        }
+
+        /// emits the destination register of a call instruction
+        void emitDestination(llvm::CallInst* call){
+            emitReg(call);
+        }
+
+        /// distinguishes between a register and a constant operand and emits the appropriate code
+        void emitOperand(llvm::Value* arg){
+            // args can be:
+            // - constants
+            // - CallInsts -> have registers
+            // - parameters -> have registers
+            // 
+
+            if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(arg)){
+                // TODO maybe factor out to custom func
+                // TODO this will be wrong for some things where there is actually a literal 0 required
+                if(constInt == XZR) out << "XZR";
+                else                out << constInt->getZExtValue();
+            }else if(auto call = llvm::dyn_cast<llvm::CallInst>(arg)){
+                emitReg(call);
+            }else if(auto param = llvm::dyn_cast<llvm::Argument>(arg)){
+                // TODO are these rewritten correctly? i.e. if it is spilled, will it be replaced with a load?
+                out << "X" << param->getArgNo();
+            }else{
+
+
+                DEBUGLOG("cannot handle arg " << *arg)
+                EXIT_TODO_X("unhandled arg type");
+            }
+        }
+
+        /// emits the operands of an instruction (including the register assigned to the call as destination register), separated by commas, howMany indicates how many operands to emit at max, 0 means all
+        void emitDestAndOps(llvm::CallInst* call, unsigned howMany = 0){
+            emitDestination(call);
+
+            if(howMany == 0 || howMany > call->arg_size()) howMany = call->arg_size();
+            for(unsigned i = 0; i < howMany; i++){
+                auto arg = call->getArgOperand(i);
+                out << ", ";
+                emitOperand(arg);
+            }
+        }
+
+        void emitInstruction(llvm::CallInst* call){
+            if(call->getCalledFunction()->hasMetadata("arm_instruction_function")){
+                // 'ARMInstruction's which need special handling:
+                // - add_SP
+                // - add_SHIFT
+                // - sub_SP
+                // - sub_SHIFT
+                // - csel_i1
+                // - csel
+                // - lsl_imm
+                // - asr_imm
+                // - lsl_var
+                // - asr_var
+                // - ldr
+                // - ldr_sb
+                // - ldr_sh
+                // - ldr_sw
+                // - str
+                // - str32_b
+                // - str32_h
+                // - str32
+                // - b
+                // - b_cond
+                // - b_cbnz
+                // - b_cbz
+                // - PSEUDO_addr_computation
+                // - cmp (no destination)
+#define CASE(ARMInstruction) (call->getCalledFunction()==instructionFunctions[ARMInstruction])
+
+                out << "\t";
+
+                // TODO can any of these things have immediate operands? if so, we need to handle them here, like in the more general case
+                if(CASE(ARM_add_SP)){
+                    out << "add sp, sp, " << call->getArgOperand(0)->getName();
+                }else if (CASE(ARM_add_SHIFT)){
+                    out << "add ";
+                    emitDestAndOps(call, 2);
+                    out << ", ";
+                    // immediate
+                    // TODO is this even right
+                    // (if I correct it here, also correct it for sub)
+                    out << "lsl " << llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2))->getZExtValue();
+                }else if (CASE(ARM_sub_SP)){
+                    out << "sub sp, sp, " << call->getArgOperand(0)->getName();
+                }else if (CASE(ARM_sub_SHIFT)){
+                    out << "sub ";
+                    emitDestAndOps(call, 2);
+                    out << ", ";
+                    // immediate
+                    out << "lsl " << llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(2))->getZExtValue();
+                }else if (CASE(ARM_csel_i1) || CASE(ARM_csel)){
+                    out << "csel ";
+                    emitDestAndOps(call, 2);
+                    out << ", ";
+                    out << llvmGetStringMetadata(call, "pred");
+                }else if(CASE(ARM_lsl_imm)){
+                    out << "lsl ";
+                    emitDestAndOps(call, 1);
+                    out << ", ";
+                    out << llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1))->getZExtValue();
+                }else if(CASE(ARM_asr_imm)){
+                    out << "asr ";
+                    emitDestAndOps(call, 1);
+                    out << ", ";
+                    out << llvm::dyn_cast<llvm::ConstantInt>(call->getArgOperand(1))->getZExtValue();
+                }else if(CASE(ARM_lsl_var)){
+                    out << "lsl ";
+                    emitDestAndOps(call, 2);
+                }else if(CASE(ARM_asr_var)){
+                    out << "asr ";
+                    emitDestAndOps(call, 2);
+                }else if(CASE(ARM_ldr)){
+                    // now distinguish between a few cases:
+                    // - simple ldr from "normal" alloca (ldr call has only alloca as operand)
+                    // - ldr has immediate offset (ldr call has alloca and offset as operands)
+                    // - ldr has offset-register and shift (ldr call has alloca, offset, shift as operands)
+                    // - ldr comes from inttoptr (ldr call has inttoptr, offset, shift as operands) 
+
+                    // if alloca -> one of the first 3 cases
+                    if(auto alloca = llvm::dyn_cast<llvm::AllocaInst>(call->getArgOperand(0))){
+                        if(call->arg_size() == 1){
+                            out << "ldr ";
+                            emitDestination(call);
+                            out << ", [fp, " << framePointerRelativeAddresses[alloca] << "]";
+                        }else if(call->arg_size() == 2){
+                            out << "ldr ";
+                            emitDestination(call);
+                            out << ", [fp, " << (framePointerRelativeAddresses[alloca] + llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(1))->getSExtValue()) << "]";
+                        }else if(call->arg_size() == 3){
+                            // bit of a hack to not use more registers for the address calculation here:
+                            // addr = fp - framePointerRelativeAddresses[alloca] + (offset-register << shift)
+                            // the problem is that we cant have the fp - framePointerRelativeAddresses[alloca] in one instruction
+                            // so calculate that part in fp itself
+                            out << "add fp, fp, " << framePointerRelativeAddresses[alloca] << "\n";
+                            out << "\t.cfi_adjust_cfa_offset " << framePointerRelativeAddresses[alloca] << "\n";
+
+                            out << "\tldr ";
+                            emitDestination(call);
+                            out << ", [fp, ";
+                            emitReg(call->getOperand(1));
+                            out << ", lsl ";
+                            out << llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(2))->getZExtValue() << "]\n";
+
+                            out << "\tsub fp, fp, " << framePointerRelativeAddresses[alloca];
+                            out << "\t.cfi_adjust_cfa_offset " << -framePointerRelativeAddresses[alloca] << "\n";
+                        }
+                    }else{
+                        // TODO fix this problem also for the stores
+
+                        // in this case its either an inttoptr operand, or a "raw" load from any address
+
+                        if(call->arg_size() == 1){
+                            // raw load
+                            out << "ldr ";
+                            emitDestination(call);
+                            out << ", [";
+                            emitReg(call->getOperand(0));
+                            out << "]";
+                        }else{
+                            assert(call->arg_size() == 3 && "expected inttoptr ldr");
+                            // inttoptr operand, i.e. an arbitrary expression in a register
+                            // -> address is in register, use that as base, then offset register and shift
+                            out << "ldr ";
+                            emitDestination(call);
+                            out << ", [";
+                            emitReg(call->getOperand(0));
+                            out << ", ";
+                            emitReg(call->getOperand(1));
+                            out << ", lsl " << llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(2))->getZExtValue() << "]";
+                        }
+                    }
+                }else if(CASE(ARM_ldr_sb) || CASE(ARM_ldr_sh) || CASE(ARM_ldr_sw)){
+                    // in this case its an inttoptr operand, i.e. an arbitrary expression in a register
+                    // -> address is in register, use that as base, then offset register and shift
+
+                    out << "ldr"; 
+                    if(CASE(ARM_ldr_sb)){
+                        out << "sb ";
+                    }else if(CASE(ARM_ldr_sh)){
+                        out << "sh ";
+                    }else if(CASE(ARM_ldr_sw)){
+                        out << "sw ";
+                    }
+                    emitDestination(call);
+                    out << ", [";
+                    emitReg(call->getOperand(0));
+                    out << ", ";
+                    emitReg(call->getOperand(1));
+                    out << ", lsl " << llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(2))->getZExtValue() << "]";
+                }else if(CASE(ARM_str)){
+                    // now distinguish between a few cases:
+                    // - simple str to "normal" alloca (str call has what to store, and alloca as operand)
+                    // - str has immediate offset (str call has what to store, alloca and offset as operands)
+                    // - str has offset-register and shift (str call has what to store, alloca, offset, shift as operands)
+                    // - str comes from inttoptr (str call has what to store, inttoptr, offset, shift as operands) 
+
+                    // if alloca -> one of the first 3 cases
+                    if(auto alloca = llvm::dyn_cast<llvm::AllocaInst>(call->getArgOperand(1))){
+                        if(call->arg_size() == 2){
+                            out << "str ";
+                            emitReg(call->getOperand(0));
+                            out << ", [fp, " << framePointerRelativeAddresses[alloca] << "]";
+                        }else if(call->arg_size() == 3){
+                            out << "str ";
+                            emitReg(call->getOperand(0));
+                            out << ", [fp, " << (framePointerRelativeAddresses[alloca] + llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(2))->getSExtValue()) << "]";
+                        }else if(call->arg_size() == 4){
+                            // bit of a hack to not use more registers for the address calculation here:
+                            // addr = fp - framePointerRelativeAddresses[alloca] + (offset-register << shift)
+                            // the problem is that we cant have the fp - framePointerRelativeAddresses[alloca] in one instruction
+                            // so calculate that part in fp itself
+                            out << "add fp, fp, " << framePointerRelativeAddresses[alloca] << "\n";
+                            out << "\t.cfi_adjust_cfa_offset " << framePointerRelativeAddresses[alloca] << "\n";
+
+                            out << "\tstr ";
+                            emitReg(call->getOperand(0));
+                            out << ", [fp, ";
+                            emitReg(call->getOperand(2));
+                            out << ", lsl ";
+                            out << llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(3))->getZExtValue() << "]\n";
+
+                            out << "\tsub fp, fp, " << framePointerRelativeAddresses[alloca];
+                            out << "\t.cfi_adjust_cfa_offset " << -framePointerRelativeAddresses[alloca] << "\n";
+                        }
+                    }else{
+                        // in this case its either an inttoptr operand, or a "raw" store from any address
+                        if(call->arg_size() == 2){
+                            // raw str
+                            out << "str ";
+                            emitReg(call->getOperand(0));
+                            out << ", [";
+                            emitReg(call->getOperand(1));
+                            out << "]";
+                        } else{
+                            assert(call->arg_size() == 4 && "expected inttoptr str");
+
+                            // inttoptr operand, i.e. an arbitrary expression in a register
+                            // -> address is in register, use that as base, then offset register and shift
+                            out << "str ";
+                            emitReg(call->getOperand(0));
+                            out << ", [";
+                            emitReg(call->getOperand(1));
+                            out << ", ";
+                            emitReg(call->getOperand(2));
+                            out << ", lsl " << llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(3))->getZExtValue() << "]";
+                        }
+                    }
+                }else if(CASE(ARM_str32) || CASE(ARM_str32_h) || CASE(ARM_str32_b)){
+                    // in this case its an inttoptr operand, i.e. an arbitrary expression in a register
+                    // -> address is in register, use that as base, then offset register and shift
+
+                    out << "str"; 
+                    if(CASE(ARM_str32_h)){
+                        out << "h ";
+                    }else if(CASE(ARM_str32_b)){
+                        out << "b ";
+                    }else if(CASE(ARM_str32)){
+                        out << " ";
+                    }
+                    emitReg<32>(call->getOperand(0));
+                    out << ", [";
+                    emitReg<32>(call->getOperand(1));
+                    out << ", ";
+                    emitReg<32>(call->getOperand(2));
+                    out << ", lsl " << llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(3))->getZExtValue() << "]";
+                }else if(CASE(ARM_b)){
+                    // fallthrough has been handled in ISel by not creating branch calls in that case
+                    out << "b " << llvmNameToBlockLabel(currentFunction, call);
+                }else if(CASE(ARM_b_cond)){
+                    out << "b." << llvmGetStringMetadata(call, "pred") << " " << llvmNameToBlockLabel(currentFunction, call);
+                }else if(CASE(ARM_b_cbnz)){
+                    out << "cbnz ";
+                    emitReg(call->getOperand(0));
+                    out << ", " << llvmNameToBlockLabel(currentFunction, call);
+                }else if(CASE(ARM_b_cbz)){
+                    out << "cbz ";
+                    emitReg(call->getOperand(0));
+                    out << ", " << llvmNameToBlockLabel(currentFunction, call);
+                }else if(CASE(ARM_PSEUDO_addr_computation)){
+                    // arg is always an alloca
+                    out << "add ";
+                    emitDestination(call);
+                    out << ", fp, " << framePointerRelativeAddresses[llvm::dyn_cast<llvm::AllocaInst>(call->getArgOperand(0))];
+                }else if(CASE(ARM_cmp)){
+                    out << "cmp ";
+                    emitReg(call->getOperand(0));
+                    out << ", ";
+                    emitReg(call->getOperand(1));
+                }else{
+                    // TODO check loads and stores again
+
+                    // standard case for instructions which don't need modifying
+                    out << call->getCalledFunction()->getName().substr(4) << " ";
+
+                    emitDestination(call);
+                    for(auto& arg: call->args()){
+                        out << ", ";
+                        auto argVal = arg.get();
+                        emitOperand(argVal);
+                    }
+                }
+                out << "\n";
+            }else{
+                // call arguments have already been moved to the correct registers, so discard them
+                out << "\tbl " << call->getCalledFunction()->getName() << "\n";
+            }
+        }
+
+        void emitFunction(llvm::Function* f){
+            currentFunction = f;
+
+            emitPrologue(f);
+
+            framePointerRelativeAddresses.clear();
+            unsigned stackAllocation{0};
+
+            // handle allocas
+            for(auto& inst: f->getEntryBlock()){
+                if(auto alloca = llvm::dyn_cast_if_present<llvm::AllocaInst>(&inst)){
+                    // add bitwidth in bytes (* allocation size if applicable) to stack allocation
+                    int typeBitWidth = alloca->getAllocatedType()->getIntegerBitWidth();
+                    int allocationSize = 1*typeBitWidth/8;
+                    if (alloca->getNumOperands() > 0) allocationSize *= dyn_cast<llvm::ConstantInt>(alloca->getOperand(0))->getZExtValue();
+
+                    stackAllocation += allocationSize;
+                    framePointerRelativeAddresses[alloca] = - static_cast<int>(stackAllocation); // we have subtracted the previous stack allocation as well as the new allocation, bringing us to the point from which the current allocation can be addressed
+                }
+            }
+            if(stackAllocation>0){
+                if(stackAllocation%16!=0) stackAllocation += 16 - stackAllocation%16;
+                out << "\tsub sp, sp, " << stackAllocation << "\n";
+            }
+
+            for(auto& bb: *f){
+                if(bb.hasNPredecessors(0) && !bb.isEntryBlock()) continue; // skip unreachable blocks (they haven't been reg allocated anyway)
+
+                out << llvmNameToBlockLabel(currentFunction, bb.getName()) << ":\n";
+                for(auto& inst: bb){
+                    if(auto call = llvm::dyn_cast_if_present<llvm::CallInst>(&inst)){
+                        emitInstruction(call);
+                    }else if(auto ret = llvm::dyn_cast_if_present<llvm::ReturnInst>(&inst)){
+                        if(ret->getNumOperands()>0){
+                            out << "\tmov X0, ";
+                            emitOperand(ret->getOperand(0));
+                            out << "\n";
+                        }
+                        out << "\tmov sp, fp\n"; // deallocate stackframe
+                        out << "\tldp fp, lr, [sp], 16\n";
+                        out << "\t.cfi_restore 30\n";
+                        out << "\t.cfi_restore 29\n";
+                        out << "\t.cfi_def_cfa sp, 0\n";
+                        out << "\tret\n";
+                    }else if(llvm::isa<llvm::BranchInst>(&inst) || llvm::isa<llvm::AllocaInst>(&inst) || llvm::isa<llvm::UnreachableInst>(&inst)){
+                        // branches are simply ignored, they are explicitly converted to branch arm instructions in ISel
+                        // allocas are ignored, they are handled in the prologue
+                        // unreachables are ignored, because what else should we do?
+                    }else{
+                        EXIT_TODO;
+                    }
+                }
+            }
+
+            emitEpilogue(f);
+        }
+
+        void doAsmOutput(){
+            for(auto& f: *moduleUP){
+                if(f.isDeclaration()) continue;
+                emitFunction(&f);
+            }
+        }
+
+    };
+
+} // namespace Codegen::Asm
+
+int main(int argc, char *argv[]) {
 #define MEASURE_TIME_START(point) auto point ## _start = std::chrono::high_resolution_clock::now()
 
 #define MEASURE_TIME_END(point) auto point ## _end = std::chrono::high_resolution_clock::now()
@@ -3761,8 +4252,9 @@ int main(int argc, char *argv[])
     double codegenSeconds{0.0};
     double iselSeconds{0.0};
     double regallocSeconds{0.0};
+    double asmSeconds{0.0};
 
-    if(parsedArgs.contains(ArgParse::possible.print) || parsedArgs.contains(ArgParse::possible.dot)){
+    if(parsedArgs.contains(ArgParse::possible.print) || parsedArgs.contains(ArgParse::possible.dot) || parsedArgs.contains(ArgParse::possible.url)){
         if(parsedArgs.contains(ArgParse::possible.url)){
             std::stringstream ss;
             ast->printDOT(ss);
@@ -3780,50 +4272,57 @@ int main(int argc, char *argv[])
         }else{
             ast->print(std::cout);
         }
-    }else if(parsedArgs.contains(ArgParse::possible.llvm)){
+    }else {
         std::error_code errorCode;
         llvm::raw_ostream* llvmOut = &llvm::outs();
         llvm::raw_fd_ostream* llvmOutFileToClose = nullptr;
+        llvm::raw_fd_ostream devNull = llvm::raw_fd_ostream("/dev/null", errorCode);
         if(parsedArgs.contains(ArgParse::possible.output)){
             llvmOut = llvmOutFileToClose = new llvm::raw_fd_ostream(parsedArgs.at(ArgParse::possible.output), errorCode);
         }
         MEASURE_TIME_START(codegen);
-        if(!(genSuccess = Codegen::generate(*ast, *llvmOut))){
+        if(!(genSuccess = Codegen::generate(*ast, parsedArgs.contains(ArgParse::possible.llvm) ? llvmOut : nullptr))){
             llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
         }
         MEASURE_TIME_END(codegen);
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
         // isel 
-        if(parsedArgs.contains(ArgParse::possible.isel)){
-            MEASURE_TIME_START(isel);
-            Codegen::ISel::doISel(*llvmOut);
-            MEASURE_TIME_END(isel);
-            iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
-            
-            // regalloc
-            if(parsedArgs.contains(ArgParse::possible.regalloc)){
-                MEASURE_TIME_START(regalloc);
-                Codegen::RegAlloc::doRegAlloc(*llvmOut);
-                MEASURE_TIME_END(regalloc);
-                regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
-            }
-        }
+        MEASURE_TIME_START(isel);
+        Codegen::ISel::doISel(parsedArgs.contains(ArgParse::possible.isel) ? llvmOut : nullptr);
+        MEASURE_TIME_END(isel);
+        iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
+
+        // regalloc
+        MEASURE_TIME_START(regalloc);
+        Codegen::RegAlloc::doRegAlloc(parsedArgs.contains(ArgParse::possible.regalloc) ? llvmOut : nullptr);
+        MEASURE_TIME_END(regalloc);
+        regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
+
+        // asm
+        MEASURE_TIME_START(asm);
+        (Codegen::AssemblyGen(parsedArgs.contains(ArgParse::possible.asmout) ? llvmOut : &devNull)).doAsmOutput();
+        MEASURE_TIME_END(asm);
+        asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
 
         if(llvmOutFileToClose != nullptr){
             llvmOutFileToClose->close();
             delete llvmOut;
         }
+        devNull.close();
     }
+
     //print execution times
     if(parsedArgs.contains(ArgParse::possible.benchmark)){
         std::cout << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s"  << std::endl;
         std::cout << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s"  << std::endl;
         std::cout << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s"  << std::endl;
         std::cout << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s"  << std::endl;
-        std::cout << "Average register allocation  time: (over "  << 1          << " iterations): " << regallocSeconds                                  << "s"  << std::endl;
+        std::cout << "Average register allocation time: (over "   << 1          << " iterations): " << regallocSeconds                                  << "s"  << std::endl;
+        std::cout << "Average assembly generation time: (over "   << 1          << " iterations): " << asmSeconds                                       << "s"  << std::endl;
         std::cout << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB" << std::endl;
     }
+
     if(!genSuccess) return EXIT_FAILURE;
 
     return EXIT_SUCCESS;

@@ -3739,10 +3739,12 @@ namespace Codegen{
         }
 
         /**
-          Stack layout:
+          OLD Stack layout:
           |______...______|<- sp at start/CFA
           |_link register_|
           |_old frame ptr_|<- fp
+          |__local  vars__|
+          |__local  vars__|
           |__local  vars__|
           |______...______|
 
@@ -3751,6 +3753,16 @@ namespace Codegen{
           -> localvars[0] is at fp - 8 or CFA - 24
           -> localvars[1] is at fp - 16 or CFA - 32
           ...
+
+          NEW Stack layout:
+
+          |______...______|<- sp at start/CFA
+          |_link register_|
+          |_old frame ptr_|
+          |__local  vars__|
+          |__local  vars__|
+          |__local  vars__|<- fp
+          |______...______|
         */
         void emitPrologue(llvm::Function* f){
             out << "\t.global " << f->getName() << "\n";
@@ -3764,6 +3776,8 @@ namespace Codegen{
             out << "\t.cfi_def_cfa fp, 16\n"; // x29 = fp, offset +16 to get to CFA
             out << "\t.cfi_offset 29, -16\n"; // x29 = fp, offset -16 to get to fp
             out << "\t.cfi_offset 30, -8\n";  // x30 = lr, offset -8  to get to lr
+
+            // fp currently points to the old frame ptr, we haven't allocated any local vars yet
         }
 
         void emitEpilogue(llvm::Function* f){
@@ -4012,6 +4026,7 @@ namespace Codegen{
                             emitReg(call->getOperand(0));
                             out << ", [fp, " << (framePointerRelativeAddresses[alloca] + llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(2))->getSExtValue()) << "]";
                         }else if(call->arg_size() == 4){
+                            // TODO does this still work for the new stack layout? (also for loads)
                             // bit of a hack to not use more registers for the address calculation here:
                             // addr = fp - framePointerRelativeAddresses[alloca] + (offset-register << shift)
                             // the problem is that we cant have the fp - framePointerRelativeAddresses[alloca] in one instruction
@@ -4117,6 +4132,7 @@ namespace Codegen{
             currentFunction = f;
 
             emitPrologue(f);
+            // fp points to old fp currently
 
             framePointerRelativeAddresses.clear();
             unsigned stackAllocation{0};
@@ -4130,12 +4146,22 @@ namespace Codegen{
                     if (alloca->getNumOperands() > 0) allocationSize *= dyn_cast<llvm::ConstantInt>(alloca->getOperand(0))->getZExtValue();
 
                     stackAllocation += allocationSize;
-                    framePointerRelativeAddresses[alloca] = - static_cast<int>(stackAllocation); // we have subtracted the previous stack allocation as well as the new allocation, bringing us to the point from which the current allocation can be addressed
+                    framePointerRelativeAddresses[alloca] = - static_cast<int>(stackAllocation); // we have subtracted the previous stack allocation as well as the new allocation, bringing us to the point from which the current allocation can be addressed. THIS IS ALSO NOT CORRECT YET! this currently assumes the fp pointing to the old fp. We add the stackframe size later, so the addressing is from the bottom of the fixedsize stack frame
                 }
             }
             if(stackAllocation>0){
                 if(stackAllocation%16!=0) stackAllocation += 16 - stackAllocation%16;
                 out << "\tsub sp, sp, " << stackAllocation << "\n";
+                out << "\tmov fp, sp " << "\n"; // fp now points to bottom of fixed size stack frame
+
+                // for all frame pointer relative addresses, add the size of the allocation, so that they point to the correct (starting from the bottom of the fixed size stack frame)
+                // this is done to allow a bigger addressing range
+                for(auto [alloca, offset]: framePointerRelativeAddresses){
+                    framePointerRelativeAddresses[alloca] += stackAllocation;
+                }
+
+                // now correct cfi directives
+                out << "\t.cfi_def_cfa fp, " << stackAllocation+16 << "\n"; // +stack frame size to get to old fp, +16 to get from old fp to CFA
             }
 
             for(auto& bb: *f){
@@ -4151,7 +4177,7 @@ namespace Codegen{
                             emitOperand(ret->getOperand(0));
                             out << "\n";
                         }
-                        out << "\tmov sp, fp\n"; // deallocate stackframe
+                        out << "\tadd sp, fp, " << stackAllocation <<"\n"; // deallocate stackframe (fp+stackAllocation gets back to old fp)
                         out << "\tldp fp, lr, [sp], 16\n";
                         out << "\t.cfi_restore 30\n";
                         out << "\t.cfi_restore 29\n";

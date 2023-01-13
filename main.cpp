@@ -1381,6 +1381,10 @@ namespace Codegen{
         inst->setMetadata(mdName, md);
     }
 
+    void            llvmSetEmptyMetadata(llvm::Instruction* inst, llvm::StringRef mdName){
+        inst->setMetadata(mdName, llvm::MDNode::get(ctx, {}));
+    }
+
     string llvmPredicateToARM(llvm::ICmpInst::Predicate pred){
         switch(pred){
             // we only use 6 of these:
@@ -3364,7 +3368,7 @@ namespace Codegen::RegAlloc{
                 // at the moment all ARM_mov instructions are materializing, so this check suffices
                 // or set noSpill if its a phi, because we don't want to spill phis
                 if(inst->getCalledFunction()==instructionFunctions[ARM_mov] || inst->hasMetadata("phi")){
-                    inst->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
+                    llvmSetEmptyMetadata(inst, "noSpill");
                 }
             }
             sortedCache.emplace_front(AllocatedRegister{val, Register{r}});
@@ -3453,6 +3457,93 @@ namespace Codegen::RegAlloc{
         }
     };
 
+    /// the goal here is to write something that actually works, not to write something that is efficient. Because the thing above is a monstrous abomination and disaster
+    /// Currently not used anywhere, because that made an even bigger mess. I have to write this again from scratch if I really want to make it better.
+    class StackRegisterAllocator{
+    public:
+        llvm::ValueMap<llvm::Value*, AllocatedStackslot> spillMap{};
+
+        /// where to insert spill instructions
+        llvm::IRBuilder<>& irb;
+        llvm::AllocaInst* spillsAllocation;
+
+        StackRegisterAllocator(llvm::IRBuilder<>& irb, llvm::AllocaInst* spillsAllocation) : irb(irb), spillsAllocation(spillsAllocation){}
+
+        /// gets register for value known to be on the stack.
+        /// returns register and load instruction.
+        /// sets register metadata on the load instruction.
+        std::pair<AllocatedRegister, llvm::CallInst*> get(llvm::Value* val){
+            assert(spillMap.find(val) != spillMap.end() && "value not on stack");
+            auto offset = spillMap[val].offset;
+            // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+            auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
+            auto reg = nextRegister();
+            SET_METADATA(load, reg); // set the register metadata on the load instruction
+            return {AllocatedRegister{val, reg}, load};
+        }
+
+        /// allocates a new stackslot for a value.
+        /// annotates value with stackslot metadata.
+        /// also immediately spills the value into the stackslot, if spill == true.
+        AllocatedStackslot allocate(llvm::Value* val, bool spill = true, llvm::Instruction* insertBefore = nullptr){
+            int offset = spillMap.size();
+            spillMap[val] = AllocatedStackslot{val,offset};
+            if(spill){
+                assert(llvm::isa<llvm::Instruction>(val) && "cannot spill non-instruction");
+                if(!insertBefore) 
+                    insertBefore = llvm::dyn_cast<llvm::Instruction>(val)->getNextNode();
+                irb.SetInsertPoint(insertBefore); // insert spill after value
+
+                // if we store it, then it needs a register too
+                auto reg = nextRegister();
+                SET_METADATA(llvm::dyn_cast<llvm::Instruction>(val), reg);
+                irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset << 3)});
+            }
+            if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)) {
+                inst->setMetadata("stackslot_offset", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(irb.getInt64(offset))}));
+            }
+            enlargeSpillsAllocation(1);
+            return spillMap[val];
+        }
+
+        /// takes care of getting all parameters of a function call into the right register
+        AllocatedRegister functionCall(llvm::CallInst* call){
+            assert(call->getNumOperands() <= 8 && "too many arguments for function call");
+            assert(!call->getCalledFunction()->hasMetadata("arm_instruction_function") && "this is not a real function call!");
+
+            nextReg = X0;
+            for(auto& arg: call->args()){
+                if(!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg"))
+                    continue;
+
+                get(arg);
+            }
+            nextReg = X0;
+            allocate(call);
+            return get(call).first;
+        }
+
+        void enlargeSpillsAllocation(unsigned by){
+            spillsAllocation->setOperand(0,
+                llvm::ConstantExpr::getAdd(
+                    llvm::dyn_cast<llvm::Constant>(spillsAllocation->getOperand(0)),
+                    llvm::ConstantInt::get(
+                        spillsAllocation->getOperand(0)->getType(),
+                        by // add 1 i64 -> 8 bytes
+                    )
+                )
+            );
+        }
+
+        /// none of our instructions have more than 8 operands, so we can simply do this
+        Register nextRegister(){
+            return nextReg++;
+        }
+
+    private:
+        Register nextReg = X0;
+    };
+
     void handlePhiChainsCycles(RegLRU<8>& regLRU, llvm::iterator_range<llvm::BasicBlock::phi_iterator> phiNodes){
         if(phiNodes.begin() == phiNodes.end()){
             return;
@@ -3500,17 +3591,23 @@ namespace Codegen::RegAlloc{
             auto insertBefore = phiNodes.begin()->getIncomingBlock(edgeNum)->getTerminator(); // insert stores to phi nodes at the end of the predecessor block (has been broken to take care of crit. edges)
             // because isel the terminators are of course not the last instructions anymore, so correct this so it inserts before the actual branches
             // REFACTOR: this looks terrible
-            auto maybeCall = llvm::dyn_cast_if_present<llvm::CallInst>(insertBefore);
-            while(insertBefore->getPrevNode() != nullptr && (insertBefore->getOpcode() == llvm::Instruction::Br || 
-                    (maybeCall && 
-                       (maybeCall->getCalledFunction() == instructionFunctions[ARM_b_cond] ||
-                        maybeCall->getCalledFunction() == instructionFunctions[ARM_b] ||
-                        maybeCall->getCalledFunction() == instructionFunctions[ARM_b_cbnz] ||
-                        maybeCall->getCalledFunction() == instructionFunctions[ARM_b_cbz]
-                       )
-                    )
-            )){
-                insertBefore = insertBefore->getPrevNode();
+
+            // We go to the previous one if the previous one is an ARM_cmp, or an ARM_b_xx
+
+            while(insertBefore->getPrevNode() != nullptr){
+                auto prevMaybeCall = llvm::dyn_cast_if_present<llvm::CallInst>(insertBefore->getPrevNode());
+
+                if(prevMaybeCall && (
+                    prevMaybeCall->getCalledFunction() == instructionFunctions[ARM_b] ||
+                    prevMaybeCall->getCalledFunction() == instructionFunctions[ARM_b_cond] ||
+                    prevMaybeCall->getCalledFunction() == instructionFunctions[ARM_b_cbnz] ||
+                    prevMaybeCall->getCalledFunction() == instructionFunctions[ARM_b_cbz] ||
+                    prevMaybeCall->getCalledFunction() == instructionFunctions[ARM_cmp]
+                )){
+                    insertBefore = insertBefore->getPrevNode();
+                }else{
+                    break;
+                }
             }
 
             regLRU.irb.SetInsertPoint(insertBefore);
@@ -3788,6 +3885,8 @@ namespace Codegen{
         /// emits a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
         template<int bitwidth = 64>
         void emitReg(llvm::CallInst* call){
+            DEBUGLOG("emitReg for " << *call)
+            assert(call->hasMetadata("reg") && "instruction has no reg metadata");
             int regNum = dyn_cast<llvm::ConstantAsMetadata>(call->getMetadata("reg")->getOperand(0))->getValue()->getUniqueInteger().getZExtValue();
             // i hope the compiler optimizes this in the 2 generated cases, but i don't see why it wouldn't
             if constexpr (bitwidth == 64){

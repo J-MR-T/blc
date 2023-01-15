@@ -3373,6 +3373,7 @@ namespace Codegen::RegAlloc{
             }
             sortedCache.emplace_front(AllocatedRegister{val, Register{r}});
             registerMap[val] = sortedCache.begin();
+            freeRegisters.erase(r);
             return sortedCache.cbegin()->reg;
         }
 
@@ -3383,6 +3384,8 @@ namespace Codegen::RegAlloc{
                 // cache is full, spill the least recently used value
                 whichReg = freeAnyRegister();
             }else{
+                assert(freeRegisters.size() > 0 && "not enough free registers even though cache is not full");
+
                 // cache is not full, use a free register
                 auto it = freeRegisters.begin();
                 whichReg = *it;
@@ -3430,14 +3433,19 @@ namespace Codegen::RegAlloc{
             }
             for(auto& arg : call->args()){
                 // only handle arguments which are themselves reg-allocated at all, and are not phi nodes (these are only ever directly written to the stack, never spill stored)
-                if(!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")){
-                    continue;
+                // the problem here is, this first condition excludes function parameters, thats what the last and is for
+                if((!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")) && !llvm::isa<llvm::Argument>(arg)){
+                    DEBUGLOG("should be imm: " << *arg);
+                    assert(llvm::isa<llvm::ConstantInt>(arg) && "this should be an immediate operand");
+                    auto mov = irb.CreateCall(instructionFunctions[ARM_mov], {arg});
+                    call->setOperand(reg - X0, mov); // replace the operand
+                    SET_METADATA(mov, reg++);
+                }else{
+                    int offset = spillMap[arg].offset;
+                    // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+                    auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
+                    SET_METADATA(load, reg++);
                 }
-
-                int offset = spillMap[arg].offset;
-                // offset has to be in doublewords, so multiply by 8 by shifting left by 3
-                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
-                SET_METADATA(load, reg++);
             }
 
             // test this is correct (it should at least always work, call always has at least a terminator following it)
@@ -3739,7 +3747,7 @@ namespace Codegen::RegAlloc{
 
                         call->replaceUsesOfWith(val, newVal);
                         call->setCalledFunction(instructionFunctions[ARM_str]);
-                    }else if(call->getCalledFunction()->getReturnType()==voidTy || call->hasMetadata("reg")
+                    }else if(call->hasMetadata("reg")
                             || call->getCalledFunction()==instructionFunctions[ARM_b]
                             || call->getCalledFunction()==instructionFunctions[ARM_b_cond]
                             || call->getCalledFunction()==instructionFunctions[ARM_b_cbnz]
@@ -3765,7 +3773,8 @@ namespace Codegen::RegAlloc{
                         if(!call->hasMetadata("phi")){
                             for(auto& arg: call->args()){
                                 // only handle arguments which are themselves reg-allocated at all, and are not phi nodes (these are only ever directly written to the stack, never spill stored)
-                                if(!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")){
+                                // the problem here is, this first condition excludes function parameters, thats what the last and is for
+                                if((!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")) && !llvm::isa<llvm::Argument>(arg)){
                                     continue;
                                 }
 
@@ -3774,8 +3783,8 @@ namespace Codegen::RegAlloc{
                             }
                         }
 
-                        // cmp doesnt need an output register
-                        if(call->getCalledFunction() != instructionFunctions[ARM_cmp]){
+                        // cmp, str, etc. doesnt need an output register (cmp is not void, because the branches use it)
+                        if(call->getCalledFunction()->getReturnType()!=voidTy && call->getCalledFunction() != instructionFunctions[ARM_cmp]){
                             regLRU.tryRefer(call);
                             SET_METADATA(call, regLRU.registerMap[call]->reg)
                         }
@@ -3885,7 +3894,6 @@ namespace Codegen{
         /// emits a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
         template<int bitwidth = 64>
         void emitReg(llvm::CallInst* call){
-            DEBUGLOG("emitReg for " << *call)
             assert(call->hasMetadata("reg") && "instruction has no reg metadata");
             int regNum = dyn_cast<llvm::ConstantAsMetadata>(call->getMetadata("reg")->getOperand(0))->getValue()->getUniqueInteger().getZExtValue();
             // i hope the compiler optimizes this in the 2 generated cases, but i don't see why it wouldn't

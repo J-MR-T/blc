@@ -59,8 +59,7 @@ using std::unique_ptr;
     llvm::errs() << "TODO(Line " STRINGIZE_MACRO(__LINE__) "): " << x << "\n"; \
     exit(2);
 
-// TODO
-// search for "HW 9" to find the start of the new code
+// search for "HW 9" to find the start of the new code (although there have been probably 50 bugfixes for regalloc and 5 for isel too...)
 
 struct Token{
 public:
@@ -1247,7 +1246,8 @@ namespace ArgParse{
         std::cerr << "  "         << "main input.b -pdu"                   << std::endl;
         std::cerr << "  "         << "main -lE input.b"                    << std::endl;
         std::cerr << "  "         << "main -ls input.b"                    << std::endl;
-        std::cerr << "  "         << "main -lsr input.b"                   << std::endl;
+        std::cerr << "  "         << "main -sr input.b"                    << std::endl;
+        std::cerr << "  "         << "main -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there"                   << std::endl;
     }
 
     //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
@@ -3424,8 +3424,6 @@ namespace Codegen::RegAlloc{
                 auto reg = registerForNewValue(val); // get a register for the value, this also caches it
                 SET_METADATA(load, reg); // set the register metadata on the load instruction
                 // propagate noSpill
-                // TODO i think this is wrong. These loads dont necessarily have to have noSpill
-                //if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)) if(inst->hasMetadata("noSpill")) load->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
                 // instead of RAU of the value with the load, return it and replace the val in the use that this is needed for with load in the caller
                 return {reg, load};
             }
@@ -3578,7 +3576,6 @@ namespace Codegen::RegAlloc{
         unsigned phiCounter{0};
         unsigned originalSize = regLRU.spillMap.size();
         for(auto& phi : phiNodes){
-            //regLRU.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(phiCounter)}; // TODO this should be regLRU.spillMap.size()+phiCounter, but that breaks simplemain.b, so analyze that
             regLRU.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(originalSize+phiCounter)};
             phiCounter++;
         }
@@ -3777,12 +3774,6 @@ namespace Codegen::RegAlloc{
                     }else{
                         regLRU.irb.SetInsertPoint(call);
 
-                        // TODO i think this is wrong
-                        //if(call->arg_size()>0) if(auto maybePhi = llvm::dyn_cast_if_present<llvm::Instruction>(call->getArgOperand(0))){
-                        //    if(maybePhi->getMetadata("noSpill")){
-                        //        call->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
-                        //    }
-                        //}
 
                         // loads for phis dont need seperate loads for their arguments, those are already correct
                         if(!call->hasMetadata("phi")){
@@ -3837,6 +3828,13 @@ namespace Codegen::RegAlloc{
 
 namespace Codegen{
 
+    /*
+       HW 9 START:
+       - the provided programs samples/addressCalculations.b (echoes argv[1] while demonstrating nested pointer arithmetic) and samples/simplemain.b (prints 0-9) should both work, and hopefully demonstrate that some basic stuff does work
+       - most of the problems I've encountered were with my terrible register allocation :(. Some of it is fixed, but I imagine a lot isn't.
+       - use `./main -a samples/addressCalculations.b 2>/dev/null | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\ there` to test it out using qemu user emulation. Beware of differences in the elf interpreter path (qemu-aarch64 -L ...) on your system.
+    */
+
     class AssemblyGen{
         llvm::raw_ostream& out;
 
@@ -3860,7 +3858,7 @@ namespace Codegen{
         }
 
         /**
-          OLD Stack layout:
+          OLD Stack layout (not used anymore):
           |______...______|<- sp at start/CFA
           |_link register_|
           |_old frame ptr_|<- fp
@@ -3924,7 +3922,6 @@ namespace Codegen{
         /// emits XZR, or a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
         template<int bitwidth = 64>
         void emitReg(llvm::Value* v){
-            // TODO lets hope this suffices (or even works...)
             if(v == XZR){
                 out << "XZR";
             }else if(auto param = llvm::dyn_cast<llvm::Argument>(v)){
@@ -3952,14 +3949,12 @@ namespace Codegen{
             // 
 
             if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(arg)){
-                // TODO maybe factor out to custom func
-                // TODO this will be wrong for some things where there is actually a literal 0 required
+                // TODO this will be wrong for some things where there is actually a literal 0 required, i hope thats not often the case
                 if(constInt == XZR) out << "XZR";
                 else                out << constInt->getZExtValue();
             }else if(auto call = llvm::dyn_cast<llvm::CallInst>(arg)){
                 emitReg(call);
             }else if(auto param = llvm::dyn_cast<llvm::Argument>(arg)){
-                // TODO are these rewritten correctly? i.e. if it is spilled, will it be replaced with a load?
                 out << "X" << param->getArgNo();
             }else{
 
@@ -4012,7 +4007,7 @@ namespace Codegen{
 
                 out << "\t";
 
-                // TODO can any of these things have immediate operands? if so, we need to handle them here, like in the more general case
+                // handle all immediate operands in these special cases
                 if(CASE(ARM_add_SP)){
                     out << "add sp, sp, " << call->getArgOperand(0)->getName();
                 }else if (CASE(ARM_add_SHIFT)){
@@ -4088,8 +4083,6 @@ namespace Codegen{
                             out << "\t.cfi_adjust_cfa_offset " << -framePointerRelativeAddresses[alloca] << "\n";
                         }
                     }else{
-                        // TODO fix this problem also for the stores
-
                         // in this case its either an inttoptr operand, or a "raw" load from any address
 
                         if(call->arg_size() == 1){
@@ -4231,8 +4224,6 @@ namespace Codegen{
                     out << ", ";
                     emitReg(call->getOperand(1));
                 }else{
-                    // TODO check loads and stores again
-
                     // standard case for instructions which don't need modifying
                     out << call->getCalledFunction()->getName().substr(4) << " ";
 

@@ -4180,9 +4180,9 @@ namespace Codegen{
                     }
                     emitReg<32>(call->getOperand(0));
                     out << ", [";
-                    emitReg<32>(call->getOperand(1));
+                    emitReg<64>(call->getOperand(1));
                     out << ", ";
-                    emitReg<32>(call->getOperand(2));
+                    emitReg<64>(call->getOperand(2));
                     out << ", lsl " << llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(3))->getZExtValue() << "]";
                 }else if(CASE(ARM_b)){
                     // fallthrough has been handled in ISel by not creating branch calls in that case

@@ -2883,12 +2883,27 @@ namespace Codegen::ISel{
 
                 auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(storeInst->getPointerOperand());
                 auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
-                // without truncaton -> no bitwidth check necessary
-                return irb.CreateCall(instructionFunctions[ARM_str], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr, 0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 for multiplying by 8
+                auto bitwidthOfStore = gepInstr->getResultElementType()->getIntegerBitWidth();
+                DEBUGLOG("storing value: " << *storeValue << " with bitwidth " << bitwidthOfStore)
+                
+                switch(bitwidthOfStore){
+                // args: value, base, offset, offsetshift
+                    case 8:
+                        return irb.CreateCall(instructionFunctions[ARM_str32_b], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(0)});
+                    case 16:
+                        return irb.CreateCall(instructionFunctions[ARM_str32_h], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(1)});
+                    case 32:
+                        return irb.CreateCall(instructionFunctions[ARM_str32], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
+                    case 64:
+                        return irb.CreateCall(instructionFunctions[ARM_str], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr, 0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 for multiplying by 8
+                    default: 
+                        llvm::errs() << "Fatal pattern matching error during ISel: trunc of store with bitwidth " << bitwidthOfStore << " not supported\n";
+                        exit(EXIT_FAILURE);
+                }
             },
             llvm::Instruction::Store,
             { 
-                // store arg is cast to the target type, so truncated, or target is already i64. This case handles non-truncation i.e. arbitrary first (value) arg
+                // store arg is cast to the target type, so truncated, or target is already i64 or immediate. This case handles non-truncation i.e. arbitrary first (value) arg
                 {},
                 {
                     llvm::Instruction::GetElementPtr,

@@ -3251,6 +3251,7 @@ namespace Codegen::ISel{
 
 namespace Codegen::RegAlloc{
     // normal enum, because the int values are important and much more convenient
+    // TODO add a way to make the number of used registers modular
     enum Register{
         X0 = 0, X1 = 1, X2 = 2, X3 = 3, X4 = 4, X5 = 5, X6 = 6, X7 = 7,
 
@@ -3260,8 +3261,15 @@ namespace Codegen::RegAlloc{
     };
     inline Register operator++(Register& reg, int){
         auto old = reg;
-        reg = static_cast<Register>(static_cast<int>(reg)+1);
+        reg = static_cast<Register>((static_cast<int>(reg)+1) % 8);
+        // TODO check this again, is this right now?
         return old;
+    }
+
+    Register llvmGetRegisterForArgument(llvm::Argument* arg){
+        auto argNum = arg->getArgNo();
+        assert(argNum < 8 && "more than 8 args not implemented yet");
+        return static_cast<Register>(argNum);
     }
 
     Register phiCycleBreakRegister = X24;
@@ -3303,204 +3311,204 @@ namespace Codegen::RegAlloc{
         ));
 
     // number of registers available for "general purpose" use, this also excludes registers used for special things, such as phi cycle breaks
-    template<int K>
-    class RegLRU{
-    public:
-        // TODO: test if a SmallVector<K> is actually more efficient, even with remove operations on random points (O(n) on a vector, O(1) on a list, but supposedly, the list is quite terrible)
-        std::list<AllocatedRegister> sortedCache{};
-        std::unordered_set<Register> freeRegisters{initialFreeRegisters};
-
-        // compile with -fno-rtti otherwise this doesn't work
-        llvm::ValueMap<llvm::Value*, std::list<AllocatedRegister>::iterator> registerMap{};
-        llvm::ValueMap<llvm::Value*, AllocatedStackslot> spillMap{};
-
-        /// where to insert spill instructions
-        llvm::IRBuilder<>& irb;
-        llvm::AllocaInst* spillsAllocation;
-
-        RegLRU(llvm::IRBuilder<>& irb, llvm::AllocaInst* spillsAllocation) : irb(irb), spillsAllocation(spillsAllocation){static_assert(K>=2, "Less than 2 registers are not enough for this to work");}
-
-        /// indicate to the cache that a value that is in the cache has been used.
-        /// behavior is undefined if the value is not in the cache
-        void refer(llvm::Value* val){
-            auto it = registerMap[val];
-            sortedCache.splice(sortedCache.cbegin(), sortedCache, it);
-        }
-
-        /// try to refer to a value, cache it if it's not in the cache
-        void tryRefer(llvm::Value* val){
-            if(registerMap.find(val) != registerMap.end()){
-                // in cache, refer
-                refer(val);
-            }else{
-                // not in cache -> cache it
-                registerForNewValue(val);
-            }
-        }
-
-        AllocatedStackslot& allocateStackslot(llvm::Value* val){
-            int offset = spillMap.size();
-            spillMap[val] = AllocatedStackslot{val, offset};
-            // rewrite spill allocation size (add 1)
-            // REFACTOR: this could be inserted into the IR after having finished register allocation for this function
-            enlargeSpillsAllocation(1);
-
-            if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)){
-                inst->setMetadata("stackslot_offset", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(irb.getInt64(offset))}));
-            }
-
-            return spillMap[val];
-        }
-
-        void enlargeSpillsAllocation(unsigned by){
-            spillsAllocation->setOperand(0,
-                llvm::ConstantExpr::getAdd(
-                    llvm::dyn_cast<llvm::Constant>(spillsAllocation->getOperand(0)),
-                    llvm::ConstantInt::get(
-                        spillsAllocation->getOperand(0)->getType(),
-                        by // add 1 i64 -> 8 bytes
-                    )
-                )
-            );
-        }
-
-        void spillStore(llvm::Value* val){
-            // Dont need to spill if
-            // a) value is not in a register, so we don't need to spill it
-            //   or
-            // b) noSpill is set (e.g. phis, materialized constants)
-            if(registerMap.find(val) == registerMap.end() || (llvm::isa<llvm::Instruction>(val) && llvm::dyn_cast<llvm::Instruction>(val)->hasMetadata("noSpill"))){
-                DEBUGLOG("Not spilling " << *val << " because it is not in a register or has noSpill set");
-                if(registerMap.find(val) != registerMap.end()){
-                    // in this case we need to remove it from the cache, because spilling suggests the register will be clobbered
-                    registerMap.erase(val);
-                }
-                return;
-            }
-
-            int offset;
-            if(spillMap.find(val) != spillMap.end()){
-                // stack slot exists, store there
-                offset = spillMap[val].offset;
-            }else{
-                // stack slot does not exist, create it
-                offset = allocateStackslot(val).offset;
-            }
-            // offset has to be in doublewords, so multiply by 8 by shifting left by 3
-            irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset << 3)});
-        }
-
-        Register freeAnyRegister(){
-            auto valToSpill = sortedCache.back();
-            auto whichReg = valToSpill.reg;
-            spillStore(valToSpill.value);
-
-            freeRegisters.insert(whichReg);
-            registerMap.erase(valToSpill.value);
-            sortedCache.pop_back();
-            return whichReg;
-        }
-
-        const Register& assignReg(llvm::Value* val, Register& r){
-            if(auto inst = dyn_cast_if_present<llvm::CallInst>(val)){
-                // set noSpill here if it's a materializing mov
-                // at the moment all ARM_mov instructions are materializing, so this check suffices
-                // or set noSpill if its a phi, because we don't want to spill phis
-                if(inst->getCalledFunction()==instructionFunctions[ARM_mov] || inst->hasMetadata("phi")){
-                    llvmSetEmptyMetadata(inst, "noSpill");
-                }
-            }
-            sortedCache.emplace_front(AllocatedRegister{val, Register{r}});
-            registerMap[val] = sortedCache.begin();
-            freeRegisters.erase(r);
-            return sortedCache.cbegin()->reg;
-        }
-
-        /// insert a new value into the cache, spills the least recently used value if the cache is full
-        const Register& registerForNewValue(llvm::Value* val){
-            Register whichReg;
-            if(sortedCache.size() == K){
-                // cache is full, spill the least recently used value
-                whichReg = freeAnyRegister();
-            }else{
-                assert(freeRegisters.size() > 0 && "not enough free registers even though cache is not full");
-
-                // cache is not full, use a free register
-                auto it = freeRegisters.begin();
-                whichReg = *it;
-                freeRegisters.erase(it);
-            }
-            // insert new value
-            return assignReg(val, whichReg);
-        }
-
-        /// get the register allocated to a value (which is either in a register or on the stack), assign one and load it from the stack if necessary, spill the least recently used value if the cache is full
-        const std::pair<const Register&, llvm::Value*> registerForExistingValue(llvm::Value* val){
-            if(registerMap.find(val) != registerMap.end()){
-                // in cache, refer
-                refer(val);
-                return {registerMap[val]->reg, val};
-            }else{
-                // not in cache -> has to be on the stack, load it
-                int offset = spillMap[val].offset;
-                // offset has to be in doublewords, so multiply by 8 by shifting left by 3
-                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
-                auto reg = registerForNewValue(val); // get a register for the value, this also caches it
-                SET_METADATA(load, reg); // set the register metadata on the load instruction
-                // propagate noSpill
-                // instead of RAU of the value with the load, return it and replace the val in the use that this is needed for with load in the caller
-                return {reg, load};
-            }
-        }
-
-        void handleFunctionCall(llvm::CallInst* call){
-            DEBUGLOG("handling function call " << *call << ", cache size: " << sortedCache.size() << ", free registers: " << freeRegisters.size() << ", spill map size: " << spillMap.size())
-            irb.SetInsertPoint(call);
-
-            // spill and remove all registers from cache
-            while(sortedCache.size() > 0){
-                freeAnyRegister();
-            }
-
-            // REFACTOR: use values from registers if possible
-            // for simplicity (to avoid cycles/chains in these moves), load the arguments into the parameter registers from the stack, so they don't override each other
-            Register reg = X0;
-            if(call->getNumOperands() > 8){
-                EXIT_TODO;
-            }
-            for(auto& arg : call->args()){
-                // only handle arguments which are themselves reg-allocated at all, and are not phi nodes (these are only ever directly written to the stack, never spill stored)
-                // the problem here is, this first condition excludes function parameters, thats what the last and is for
-                if((!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")) && !llvm::isa<llvm::Argument>(arg)){
-                    DEBUGLOG("should be imm: " << *arg);
-                    assert(llvm::isa<llvm::ConstantInt>(arg) && "this should be an immediate operand");
-                    auto mov = irb.CreateCall(instructionFunctions[ARM_mov], {arg});
-                    call->setOperand(reg - X0, mov); // replace the operand
-                    SET_METADATA(mov, reg++);
-                }else{
-                    int offset = spillMap[arg].offset;
-                    // offset has to be in doublewords, so multiply by 8 by shifting left by 3
-                    auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
-                    SET_METADATA(load, reg++);
-                }
-            }
-
-            // test this is correct (it should at least always work, call always has at least a terminator following it)
-            irb.SetInsertPoint(call->getNextNode());
-
-            // no values are in registers anymore, so clear the cache
-            this->registerMap.clear();
-
-            // return value into X0
-            this->freeRegisters = {X0};
-            registerForNewValue(call);
-            SET_METADATA(call, X0);
-
-            // set all other registers as free
-            this->freeRegisters = initialFreeRegisters;
-            this->freeRegisters.erase(X0);
-        }
-    };
+    //template<int K>
+    //class RegLRU{
+    //public:
+    //    // TODO: test if a SmallVector<K> is actually more efficient, even with remove operations on random points (O(n) on a vector, O(1) on a list, but supposedly, the list is quite terrible)
+    //    std::list<AllocatedRegister> sortedCache{};
+    //    std::unordered_set<Register> freeRegisters{initialFreeRegisters};
+    //
+    //    // compile with -fno-rtti otherwise this doesn't work
+    //    llvm::ValueMap<llvm::Value*, std::list<AllocatedRegister>::iterator> registerMap{};
+    //    llvm::ValueMap<llvm::Value*, AllocatedStackslot> spillMap{};
+    //
+    //    /// where to insert spill instructions
+    //    llvm::IRBuilder<>& irb;
+    //    llvm::AllocaInst* spillsAllocation;
+    //
+    //    RegLRU(llvm::IRBuilder<>& irb, llvm::AllocaInst* spillsAllocation) : irb(irb), spillsAllocation(spillsAllocation){static_assert(K>=2, "Less than 2 registers are not enough for this to work");}
+    //
+    //    /// indicate to the cache that a value that is in the cache has been used.
+    //    /// behavior is undefined if the value is not in the cache
+    //    void refer(llvm::Value* val){
+    //        auto it = registerMap[val];
+    //        sortedCache.splice(sortedCache.cbegin(), sortedCache, it);
+    //    }
+    //
+    //    /// try to refer to a value, cache it if it's not in the cache
+    //    void tryRefer(llvm::Value* val){
+    //        if(registerMap.find(val) != registerMap.end()){
+    //            // in cache, refer
+    //            refer(val);
+    //        }else{
+    //            // not in cache -> cache it
+    //            registerForNewValue(val);
+    //        }
+    //    }
+    //
+    //    AllocatedStackslot& allocateStackslot(llvm::Value* val){
+    //        int offset = spillMap.size();
+    //        spillMap[val] = AllocatedStackslot{val, offset};
+    //        // rewrite spill allocation size (add 1)
+    //        // REFACTOR: this could be inserted into the IR after having finished register allocation for this function
+    //        enlargeSpillsAllocation(1);
+    //
+    //        if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)){
+    //            inst->setMetadata("stackslot_offset", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(irb.getInt64(offset))}));
+    //        }
+    //
+    //        return spillMap[val];
+    //    }
+    //
+    //    void enlargeSpillsAllocation(unsigned by){
+    //        spillsAllocation->setOperand(0,
+    //            llvm::ConstantExpr::getAdd(
+    //                llvm::dyn_cast<llvm::Constant>(spillsAllocation->getOperand(0)),
+    //                llvm::ConstantInt::get(
+    //                    spillsAllocation->getOperand(0)->getType(),
+    //                    by // add 1 i64 -> 8 bytes
+    //                )
+    //            )
+    //        );
+    //    }
+    //
+    //    void spillStore(llvm::Value* val){
+    //        // Dont need to spill if
+    //        // a) value is not in a register, so we don't need to spill it
+    //        //   or
+    //        // b) noSpill is set (e.g. phis, materialized constants)
+    //        if(registerMap.find(val) == registerMap.end() || (llvm::isa<llvm::Instruction>(val) && llvm::dyn_cast<llvm::Instruction>(val)->hasMetadata("noSpill"))){
+    //            DEBUGLOG("Not spilling " << *val << " because it is not in a register or has noSpill set");
+    //            if(registerMap.find(val) != registerMap.end()){
+    //                // in this case we need to remove it from the cache, because spilling suggests the register will be clobbered
+    //                registerMap.erase(val);
+    //            }
+    //            return;
+    //        }
+    //
+    //        int offset;
+    //        if(spillMap.find(val) != spillMap.end()){
+    //            // stack slot exists, store there
+    //            offset = spillMap[val].offset;
+    //        }else{
+    //            // stack slot does not exist, create it
+    //            offset = allocateStackslot(val).offset;
+    //        }
+    //        // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+    //        irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset << 3)});
+    //    }
+    //
+    //    Register freeAnyRegister(){
+    //        auto valToSpill = sortedCache.back();
+    //        auto whichReg = valToSpill.reg;
+    //        spillStore(valToSpill.value);
+    //
+    //        freeRegisters.insert(whichReg);
+    //        registerMap.erase(valToSpill.value);
+    //        sortedCache.pop_back();
+    //        return whichReg;
+    //    }
+    //
+    //    const Register& assignReg(llvm::Value* val, Register& r){
+    //        if(auto inst = dyn_cast_if_present<llvm::CallInst>(val)){
+    //            // set noSpill here if it's a materializing mov
+    //            // at the moment all ARM_mov instructions are materializing, so this check suffices
+    //            // or set noSpill if its a phi, because we don't want to spill phis
+    //            if(inst->getCalledFunction()==instructionFunctions[ARM_mov] || inst->hasMetadata("phi")){
+    //                llvmSetEmptyMetadata(inst, "noSpill");
+    //            }
+    //        }
+    //        sortedCache.emplace_front(AllocatedRegister{val, Register{r}});
+    //        registerMap[val] = sortedCache.begin();
+    //        freeRegisters.erase(r);
+    //        return sortedCache.cbegin()->reg;
+    //    }
+    //
+    //    /// insert a new value into the cache, spills the least recently used value if the cache is full
+    //    const Register& registerForNewValue(llvm::Value* val){
+    //        Register whichReg;
+    //        if(sortedCache.size() == K){
+    //            // cache is full, spill the least recently used value
+    //            whichReg = freeAnyRegister();
+    //        }else{
+    //            assert(freeRegisters.size() > 0 && "not enough free registers even though cache is not full");
+    //
+    //            // cache is not full, use a free register
+    //            auto it = freeRegisters.begin();
+    //            whichReg = *it;
+    //            freeRegisters.erase(it);
+    //        }
+    //        // insert new value
+    //        return assignReg(val, whichReg);
+    //    }
+    //
+    //    /// get the register allocated to a value (which is either in a register or on the stack), assign one and load it from the stack if necessary, spill the least recently used value if the cache is full
+    //    const std::pair<const Register&, llvm::Value*> registerForExistingValue(llvm::Value* val){
+    //        if(registerMap.find(val) != registerMap.end()){
+    //            // in cache, refer
+    //            refer(val);
+    //            return {registerMap[val]->reg, val};
+    //        }else{
+    //            // not in cache -> has to be on the stack, load it
+    //            int offset = spillMap[val].offset;
+    //            // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+    //            auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
+    //            auto reg = registerForNewValue(val); // get a register for the value, this also caches it
+    //            SET_METADATA(load, reg); // set the register metadata on the load instruction
+    //            // propagate noSpill
+    //            // instead of RAU of the value with the load, return it and replace the val in the use that this is needed for with load in the caller
+    //            return {reg, load};
+    //        }
+    //    }
+    //
+    //    void handleFunctionCall(llvm::CallInst* call){
+    //        DEBUGLOG("handling function call " << *call << ", cache size: " << sortedCache.size() << ", free registers: " << freeRegisters.size() << ", spill map size: " << spillMap.size())
+    //        irb.SetInsertPoint(call);
+    //
+    //        // spill and remove all registers from cache
+    //        while(sortedCache.size() > 0){
+    //            freeAnyRegister();
+    //        }
+    //
+    //        // REFACTOR: use values from registers if possible
+    //        // for simplicity (to avoid cycles/chains in these moves), load the arguments into the parameter registers from the stack, so they don't override each other
+    //        Register reg = X0;
+    //        if(call->getNumOperands() > 8){
+    //            EXIT_TODO;
+    //        }
+    //        for(auto& arg : call->args()){
+    //            // only handle arguments which are themselves reg-allocated at all, and are not phi nodes (these are only ever directly written to the stack, never spill stored)
+    //            // the problem here is, this first condition excludes function parameters, thats what the last and is for
+    //            if((!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")) && !llvm::isa<llvm::Argument>(arg)){
+    //                DEBUGLOG("should be imm: " << *arg);
+    //                assert(llvm::isa<llvm::ConstantInt>(arg) && "this should be an immediate operand");
+    //                auto mov = irb.CreateCall(instructionFunctions[ARM_mov], {arg});
+    //                call->setOperand(reg - X0, mov); // replace the operand
+    //                SET_METADATA(mov, reg++);
+    //            }else{
+    //                int offset = spillMap[arg].offset;
+    //                // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+    //                auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
+    //                SET_METADATA(load, reg++);
+    //            }
+    //        }
+    //
+    //        // test this is correct (it should at least always work, call always has at least a terminator following it)
+    //        irb.SetInsertPoint(call->getNextNode());
+    //
+    //        // no values are in registers anymore, so clear the cache
+    //        this->registerMap.clear();
+    //
+    //        // return value into X0
+    //        this->freeRegisters = {X0};
+    //        registerForNewValue(call);
+    //        SET_METADATA(call, X0);
+    //
+    //        // set all other registers as free
+    //        this->freeRegisters = initialFreeRegisters;
+    //        this->freeRegisters.erase(X0);
+    //    }
+    //};
 
     /// the goal here is to write something that actually works, not to write something that is efficient. Because the thing above is a monstrous abomination and disaster
     /// Currently not used anywhere, because that made an even bigger mess. I have to write this again from scratch if I really want to make it better.
@@ -3514,11 +3522,15 @@ namespace Codegen::RegAlloc{
 
         StackRegisterAllocator(llvm::IRBuilder<>& irb, llvm::AllocaInst* spillsAllocation) : irb(irb), spillsAllocation(spillsAllocation){}
 
+        bool isAllocated(llvm::Value* val){
+            return spillMap.find(val) != spillMap.end();
+        }
+
         /// gets register for value known to be on the stack.
         /// returns register and load instruction.
         /// sets register metadata on the load instruction.
         std::pair<AllocatedRegister, llvm::CallInst*> get(llvm::Value* val){
-            assert(spillMap.find(val) != spillMap.end() && "value not on stack");
+            assert(isAllocated(val) && "value not on stack");
             auto offset = spillMap[val].offset;
             // offset has to be in doublewords, so multiply by 8 by shifting left by 3
             auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
@@ -3527,21 +3539,32 @@ namespace Codegen::RegAlloc{
             return {AllocatedRegister{val, reg}, load};
         }
 
-        /// allocates a new stackslot for a value.
+        /// allocates a new stackslot for a new value not already on the stack.
         /// annotates value with stackslot metadata.
         /// also immediately spills the value into the stackslot, if spill == true.
         AllocatedStackslot allocate(llvm::Value* val, bool spill = true, llvm::Instruction* insertBefore = nullptr){
+            assert(!isAllocated(val) && "value already on stack");
+
             int offset = spillMap.size();
             spillMap[val] = AllocatedStackslot{val,offset};
             if(spill){
-                assert(llvm::isa<llvm::Instruction>(val) && "cannot spill non-instruction");
-                if(!insertBefore) 
+                if(!insertBefore) {
+                    assert(llvm::isa<llvm::Instruction>(val) && "if no insertBefore is given, value to spill must be an instruction");
                     insertBefore = llvm::dyn_cast<llvm::Instruction>(val)->getNextNode();
+                }
+                assert(insertBefore && "cannot insert spill instruction anywhere");
+
                 irb.SetInsertPoint(insertBefore); // insert spill after value
 
                 // if we store it, then it needs a register too
-                auto reg = nextRegister();
-                SET_METADATA(llvm::dyn_cast<llvm::Instruction>(val), reg);
+                Register reg;
+                if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)){
+                    reg = nextRegister();
+                    SET_METADATA(inst, reg);
+                }else{
+                    assert(llvm::isa<llvm::Argument>(val) && "value to spill must be an instruction or an argument");
+                    reg = llvmGetRegisterForArgument(llvm::dyn_cast<llvm::Argument>(val));
+                }
                 irb.CreateCall(instructionFunctions[ARM_str], {val, spillsAllocation, irb.getInt64(offset << 3)});
             }
             if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)) {
@@ -3589,7 +3612,7 @@ namespace Codegen::RegAlloc{
         Register nextReg = X0;
     };
 
-    void handlePhiChainsCycles(RegLRU<8>& regLRU, llvm::iterator_range<llvm::BasicBlock::phi_iterator> phiNodes){
+    void handlePhiChainsCycles(StackRegisterAllocator& allocator, llvm::iterator_range<llvm::BasicBlock::phi_iterator> phiNodes, llvm::DenseSet<llvm::PHINode*>& toEraseLater){
         if(phiNodes.begin() == phiNodes.end()){
             return;
         }
@@ -3598,14 +3621,14 @@ namespace Codegen::RegAlloc{
 
         // allocate a stack slot for each phi
         unsigned phiCounter{0};
-        unsigned originalSize = regLRU.spillMap.size();
+        unsigned originalSize = allocator.spillMap.size();
         for(auto& phi : phiNodes){
-            regLRU.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(originalSize+phiCounter)};
+            allocator.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(originalSize+phiCounter)};
             phiCounter++;
         }
-        regLRU.enlargeSpillsAllocation(phiCounter);
+        allocator.enlargeSpillsAllocation(phiCounter);
 
-        llvm::IRBuilder<>& irb  = regLRU.irb;
+        llvm::IRBuilder<>& irb  = allocator.irb;
 
         // per edge:
         unsigned edges = phiNodes.begin()->getNumIncomingValues();
@@ -3654,20 +3677,21 @@ namespace Codegen::RegAlloc{
                 }
             }
 
-            regLRU.irb.SetInsertPoint(insertBefore);
+            allocator.irb.SetInsertPoint(insertBefore);
 
             // start at phis with 0 readers
 
-#define HANDLE_CHAIN_ELEMENT(phi)                                                                                                                         \
-    /* (pseudo-)store to stack, needs to be looked at by regalloc again later on, possibly to insert load for incoming value, if its not in a register */ \
-    irb.CreateCall(                                                                                                                                       \
-            instructionFunctions[ARM_PSEUDO_str],                                                                                                         \
-            {phi->getIncomingValue(edgeNum), regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset << 3)});                            \
-    toHandle.erase(phi);                                                                                                                                  \
-    for(auto reader: readBy[phi]){                                                                                                                        \
-        numReaders[reader]--;                                                                                                                             \
-    }
-
+            auto handleChainElement = [&](llvm::PHINode* phi){
+                /* (pseudo-)store to stack, needs to be looked at by regalloc again later on, possibly to insert load for incoming value, if its not in a register */
+                irb.CreateCall(
+                    instructionFunctions[ARM_PSEUDO_str],
+                    {phi->getIncomingValue(edgeNum), allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}
+                );
+                toHandle.erase(phi);
+                for(auto reader: readBy[phi]){
+                    numReaders[reader]--;
+                }
+            };
 
             unsigned notChangedCounter = 0;
             while(toHandle.size()>0 && notChangedCounter < toHandle.size()){
@@ -3675,7 +3699,7 @@ namespace Codegen::RegAlloc{
                 notChangedCounter++;
 
                 if(numReaders[phi] == 0){
-                    HANDLE_CHAIN_ELEMENT(phi);
+                    handleChainElement(phi);
 
                     notChangedCounter = 0;
                 }
@@ -3687,7 +3711,7 @@ namespace Codegen::RegAlloc{
                 // cycle
                 // temporarily save one of the phi nodes in the special register
                 auto phi = *toHandle.begin();
-                auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset << 3)}, "phiCycleBreak");
+                auto load = allocator.irb.CreateCall(instructionFunctions[ARM_ldr], {allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}, "phiCycleBreak");
                 auto firstStore = load;
                 numReaders[phi]--;
                 SET_METADATA(load, phiCycleBreakRegister);
@@ -3697,24 +3721,28 @@ namespace Codegen::RegAlloc{
                     phi = *toHandle.begin();
 
                     if(numReaders[phi] == 0){
-                        HANDLE_CHAIN_ELEMENT(phi);
+                        handleChainElement(phi);
                     }
                 }
 
                 // last element gets assigned the special register
                 phi = *toHandle.begin();
-                regLRU.irb.CreateCall(instructionFunctions[ARM_str], {firstStore, regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[phi].offset << 3)});
+                allocator.irb.CreateCall(instructionFunctions[ARM_str], {firstStore, allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)});
             }
         }
 
         // replace all phis with loads from the stack
+        // NEW: remove phis, they will be replaced by loads later on
         for(auto& phi : llvm::make_early_inc_range(phiNodes)){
-            regLRU.irb.SetInsertPoint(phi.getParent()->getFirstNonPHI());
-            auto load = regLRU.irb.CreateCall(instructionFunctions[ARM_ldr], {regLRU.spillsAllocation, regLRU.irb.getInt64(regLRU.spillMap[&phi].offset << 3)}, "phi_" + phi.getName());
-            load->setMetadata("phi", llvm::MDNode::get(ctx, {}));
-            load->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
-            phi.replaceAllUsesWith(load);
-            phi.eraseFromParent();
+            //allocator.irb.SetInsertPoint(phi.getParent()->getFirstNonPHI());
+            //auto load = allocator.irb.CreateCall(instructionFunctions[ARM_ldr], {allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[&phi].offset << 3)}, "phi_" + phi.getName());
+            //load->setMetadata("phi", llvm::MDNode::get(ctx, {}));
+            //load->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
+            //phi.replaceAllUsesWith(load);
+            //phi.eraseFromParent();
+            phi.removeFromParent();
+            // erase later on using this set:
+            toEraseLater.insert(&phi);
         }
 
         DEBUGLOG("done with phi nodes");
@@ -3725,13 +3753,15 @@ namespace Codegen::RegAlloc{
 
         llvm::IRBuilder<> irb(f.getEntryBlock().getFirstNonPHI());
         auto spillsAllocation = irb.CreateAlloca(irb.getInt64Ty(), irb.getInt64(0), "spills");
-        RegLRU<8> regLRU{irb, spillsAllocation};
+        StackRegisterAllocator allocator{irb, spillsAllocation};
 
         // first handle phi node problems, by allocating stack slots for them, and inserting pseudo instructions to load/store them, which will get filled in by the register allocator
         // REFACTOR: To improve the performance of the allocator as whole, we could try to distinguish between register and normal phis, because phis are usually so important, that giving them their own register is worth it
         // the vague strategy would then be: replace the phis with registers, with some heuristic of what percentage of registers they can take up, make a map of bb to phi-occupied-registers, so they are not reallocated (this would be somewhat cumbersome, because it would need to include every BB on the CFG in between the definition of the value used by the phi and the phi itself), and then run the register allocator for the remaining registers on the BBs, taking into account which can still be used
+
+        llvm::DenseSet<llvm::PHINode*> phisToEraseLater{};
         for(auto& bb: f){
-            handlePhiChainsCycles(regLRU, bb.phis());
+            handlePhiChainsCycles(allocator, bb.phis(), phisToEraseLater);
         }
 
         if(f.arg_size() > 8){
@@ -3739,10 +3769,9 @@ namespace Codegen::RegAlloc{
         }
         
         // assign registers from X0 up to X7 to the arguments
-        Register reg = X0;
+        auto insertBefore = f.getEntryBlock().getFirstNonPHI(); // no PHIs in entry, so this is just get first
         for(auto& param: f.args()){
-            regLRU.assignReg(&param, reg);
-            reg++;
+            allocator.allocate(&param, true, insertBefore);
             // cannot set metadata on function parameters, so this has to be implicit
         }
 
@@ -3758,7 +3787,7 @@ namespace Codegen::RegAlloc{
                     // pseudo stores for phis
                     if (call->getCalledFunction() == instructionFunctions[ARM_PSEUDO_str]) {
                         // pseudo store, we need to possibly insert load for mem-mem mov
-                        regLRU.irb.SetInsertPoint(call);
+                        allocator.irb.SetInsertPoint(call);
 
                         auto val = call->getArgOperand(0);
                         
@@ -3769,8 +3798,9 @@ namespace Codegen::RegAlloc{
                                 auto call = irb.CreateCall(instructionFunctions[ARM_mov], {irb.getInt64(constInt->getZExtValue())});
                                 newVal = call;
 
-                                auto reg = regLRU.registerForNewValue(call);
-                                SET_METADATA(call, reg);
+                                allocator.allocate(call);
+                                //auto reg = allocator.get(call).first.reg;
+                                //SET_METADATA(call, reg);
                             }else {
                                 newVal = XZR;
                             }
@@ -3778,7 +3808,8 @@ namespace Codegen::RegAlloc{
                             (void) isntStillConst;
                             assert(isntStillConst && "constant should have been materialized");
                         }else{
-                            newVal = regLRU.registerForExistingValue(val).second;
+                            if(allocator.isAllocated(val))
+                                newVal = allocator.get(val).second;
                         }
 
                         call->replaceUsesOfWith(val, newVal);
@@ -3794,9 +3825,9 @@ namespace Codegen::RegAlloc{
                         inst.replaceAllUsesWith(inst.getOperand(0));
                         inst.eraseFromParent();
                     }else if(!call->getCalledFunction()->hasMetadata("arm_instruction_function")){
-                        regLRU.handleFunctionCall(call);
+                        allocator.functionCall(call);
                     }else{
-                        regLRU.irb.SetInsertPoint(call);
+                        allocator.irb.SetInsertPoint(call);
 
 
                         // loads for phis dont need seperate loads for their arguments, those are already correct
@@ -3804,30 +3835,48 @@ namespace Codegen::RegAlloc{
                             for(auto& arg: call->args()){
                                 // only handle arguments which are themselves reg-allocated at all, and are not phi nodes (these are only ever directly written to the stack, never spill stored)
                                 // the problem here is, this first condition excludes function parameters, thats what the last and is for
-                                if((!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")) && !llvm::isa<llvm::Argument>(arg)){
-                                    continue;
-                                }
+                                // TODO wait with the new allocation scheme this doesn't make any sense, we should just load it, right?
+                                //if((!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg")) && !llvm::isa<llvm::Argument>(arg)){
+                                //    continue;
+                                //}
 
-                                auto [_, newVal] = regLRU.registerForExistingValue(arg);
-                                call->replaceUsesOfWith(arg, newVal);
+                                if(allocator.isAllocated(arg)){
+                                    auto [_, newVal] = allocator.get(arg);
+                                    call->replaceUsesOfWith(arg, newVal);
+                                }
                             }
                         }
 
-                        // cmp, str, etc. doesnt need an output register (cmp is not void, because the branches use it)
-                        if(call->getCalledFunction()->getReturnType()!=voidTy && call->getCalledFunction() != instructionFunctions[ARM_cmp]){
-                            regLRU.tryRefer(call);
-                            SET_METADATA(call, regLRU.registerMap[call]->reg)
+                        // TODO think about this again
+                        if(allocator.isAllocated(call)){
+                            if (!call->hasMetadata("reg"))
+                                allocator.get(call);
+                        }else
+                            // cmp, str, etc. doesnt need an output register (cmp is not void, because the branches use it)
+                            if(call->getCalledFunction()->getReturnType()!=voidTy && call->getCalledFunction() != instructionFunctions[ARM_cmp] ){
+                                allocator.allocate(call);
                         }
                     }
                 } else if(auto alloca = llvm::dyn_cast_if_present<llvm::AllocaInst>(&inst)){
                     // annotate it with noSpill (meaning if it is used as an arugment somewhere, it does not get spilled)
                     alloca->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
+                } else if(auto returnInst = llvm::dyn_cast_if_present<llvm::ReturnInst>(&inst)){
+                    if(auto arg = returnInst->getReturnValue(); arg && allocator.isAllocated(arg)){
+                        irb.SetInsertPoint(returnInst);
+                        auto [_, newVal] = allocator.get(arg);
+                        returnInst->replaceUsesOfWith(arg, newVal);
+                    }
                 } else {
-                    bool isIgnored = (llvm::isa<llvm::BranchInst>(inst) || llvm::isa<llvm::ReturnInst>(inst) || llvm::isa<llvm::UnreachableInst>(inst));
+                    bool isIgnored = (llvm::isa<llvm::BranchInst>(inst) || llvm::isa<llvm::UnreachableInst>(inst));
                     (void)isIgnored;
                     assert(isIgnored && "unhandled instruction type");
                 }
             }
+        }
+
+        // delete all the phis, they've been handled now (they are already removed from their parent)
+        for(auto phi: phisToEraseLater){
+            phi->deleteValue();
         }
     }
 
@@ -4239,6 +4288,7 @@ namespace Codegen{
                     out << ", " << llvmNameToBlockLabel(currentFunction, call);
                 }else if(CASE(ARM_PSEUDO_addr_computation)){
                     // arg is always an alloca
+                    assert(llvm::isa<llvm::AllocaInst>(call->getArgOperand(0)) && "expected alloca as arg for addr computation");
                     out << "add ";
                     emitDestination(call);
                     out << ", fp, " << framePointerRelativeAddresses[llvm::dyn_cast<llvm::AllocaInst>(call->getArgOperand(0))];

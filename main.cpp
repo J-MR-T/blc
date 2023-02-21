@@ -3993,19 +3993,29 @@ namespace Codegen{
             out << regPrefix<bitwidth> << regNum;
         }
 
-        /// emits XZR, or a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
+        /// emits XZR/WZR, an immediate, or a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
+        /// -> emits the destination register if called on a value
+        /// -> emits the source register if called on an operand
         template<int bitwidth = 64>
         void emitReg(llvm::Value* v){
             static_assert(bitwidth == 32 || bitwidth == 64, "bitwidth must be 32 or 64");
 
+            // args can be:
+            // - constants (XZR)
+            // - CallInsts -> have registers
+            // - parameters -> have registers
+
             if(v == XZR){
                 out << regPrefix<bitwidth> << "ZR";
+            }else if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(v)){
+                out << constInt->getZExtValue();
             }else if(auto param = llvm::dyn_cast<llvm::Argument>(v)){
                 out << regPrefix<bitwidth> << RegAlloc::llvmGetRegisterForArgument(param);
             }else{
                 // TODO problem: this is called with allocas as args, we have to translate those to fp-relative addresses, and materialize them
                 // all of the others are handled in ptrtoint, but this cannot be done for phi nodes, as they use the ptr directly and store it somewhere (in the ARM_PSEUDO_str)
                 // the alternative would be to not do phis for ptrs
+                // TODO factor out this code to a helper "assert is type" or smth
                 bool isCall = llvm::isa<llvm::CallInst>(v);
                 (void) isCall;
                 if(!isCall) {DEBUGLOG("not a call: " << *v)}
@@ -4014,43 +4024,21 @@ namespace Codegen{
             }
         }
 
-        /// emits the destination register of a call instruction
-        void emitDestination(llvm::CallInst* call){
-            emitReg(call);
-        }
-
-        /// distinguishes between a register and a constant operand and emits the appropriate code
-        void emitOperand(llvm::Value* arg){
-            // args can be:
-            // - constants
-            // - CallInsts -> have registers
-            // - parameters -> have registers
-            // 
-
-            // TODO extract the constant thing out to emitReg, less code
-            if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(arg)){
-                // TODO this will be wrong for some things where there is actually a literal 0 required, i hope thats not often the case
-                if(constInt == XZR) out << "XZR";
-                else                out << constInt->getZExtValue();
-            }else{
-                emitReg(arg);
-            }
-        }
-
         /// emits the operands of an instruction (including the register assigned to the call as destination register), separated by commas, howMany indicates how many operands to emit at max, 0 means all
         void emitDestAndOps(llvm::CallInst* call, unsigned howMany = 0){
-            emitDestination(call);
+            emitReg(call);
 
             if(howMany == 0 || howMany > call->arg_size()) howMany = call->arg_size();
             for(unsigned i = 0; i < howMany; i++){
                 auto arg = call->getArgOperand(i);
                 out << ", ";
-                emitOperand(arg);
+                emitReg(arg);
             }
         }
 
         void emitInstruction(llvm::CallInst* call){
-            if(call->getCalledFunction()->hasMetadata("arm_instruction_function")){
+            auto calledFn = call->getCalledFunction();
+            if(calledFn->hasMetadata("arm_instruction_function")){
                 // 'ARMInstruction's which need special handling:
                 // - add_SP
                 // - add_SHIFT
@@ -4076,7 +4064,7 @@ namespace Codegen{
                 // - b_cbz
                 // - PSEUDO_addr_computation
                 // - cmp (no destination)
-#define CASE(ARMInstruction) (call->getCalledFunction()==instructionFunctions[ARMInstruction])
+#define CASE(ARMInstruction) (calledFn==instructionFunctions[ARMInstruction])
 
                 out << "\t";
 
@@ -4121,6 +4109,8 @@ namespace Codegen{
                     out << "asr ";
                     emitDestAndOps(call, 2);
                 }else if(CASE(ARM_ldr)){
+                    // TODO this load and store thing is *hella* stupid. It does work, but just add some kind of address struct to the instruction which handles this nicely, and get rid of the cases (i.e. transfer them into regalloc or isel) in which we need another register and thus adjust fp
+
                     // now distinguish between a few cases:
                     // - simple ldr from "normal" alloca (ldr call has only alloca as operand)
                     // - ldr has immediate offset (ldr call has alloca and offset as operands)
@@ -4131,11 +4121,11 @@ namespace Codegen{
                     if(auto alloca = llvm::dyn_cast<llvm::AllocaInst>(call->getArgOperand(0))){
                         if(call->arg_size() == 1){
                             out << "ldr ";
-                            emitDestination(call);
+                            emitReg(call);
                             out << ", [fp, " << framePointerRelativeAddresses[alloca] << "]";
                         }else if(call->arg_size() == 2){
                             out << "ldr ";
-                            emitDestination(call);
+                            emitReg(call);
                             out << ", [fp, " << (framePointerRelativeAddresses[alloca] + llvm::dyn_cast<llvm::ConstantInt>(call->getOperand(1))->getSExtValue()) << "]";
                         }else if(call->arg_size() == 3){
                             // bit of a hack to not use more registers for the address calculation here:
@@ -4146,7 +4136,7 @@ namespace Codegen{
                             out << "\t.cfi_adjust_cfa_offset " << framePointerRelativeAddresses[alloca] << "\n";
 
                             out << "\tldr ";
-                            emitDestination(call);
+                            emitReg(call);
                             out << ", [fp, ";
                             emitReg(call->getOperand(1));
                             out << ", lsl ";
@@ -4161,7 +4151,7 @@ namespace Codegen{
                         if(call->arg_size() == 1){
                             // raw load
                             out << "ldr ";
-                            emitDestination(call);
+                            emitReg(call);
                             out << ", [";
                             emitReg(call->getOperand(0));
                             out << "]";
@@ -4170,7 +4160,7 @@ namespace Codegen{
                             // inttoptr operand, i.e. an arbitrary expression in a register
                             // -> address is in register, use that as base, then offset register and shift
                             out << "ldr ";
-                            emitDestination(call);
+                            emitReg(call);
                             out << ", [";
                             emitReg(call->getOperand(0));
                             out << ", ";
@@ -4190,7 +4180,7 @@ namespace Codegen{
                     }else if(CASE(ARM_ldr_sw)){
                         out << "sw ";
                     }
-                    emitDestination(call);
+                    emitReg(call);
                     out << ", [";
                     emitReg(call->getOperand(0));
                     out << ", ";
@@ -4290,7 +4280,7 @@ namespace Codegen{
                     // arg is always an alloca
                     assert(llvm::isa<llvm::AllocaInst>(call->getArgOperand(0)) && "expected alloca as arg for addr computation");
                     out << "add ";
-                    emitDestination(call);
+                    emitReg(call);
                     out << ", fp, " << framePointerRelativeAddresses[llvm::dyn_cast<llvm::AllocaInst>(call->getArgOperand(0))];
                 }else if(CASE(ARM_cmp)){
                     out << "cmp ";
@@ -4301,11 +4291,11 @@ namespace Codegen{
                     // standard case for instructions which don't need modifying
                     out << call->getCalledFunction()->getName().substr(4) << " ";
 
-                    emitDestination(call);
+                    emitReg(call);
                     for(auto& arg: call->args()){
                         out << ", ";
                         auto argVal = arg.get();
-                        emitOperand(argVal);
+                        emitReg(argVal);
                     }
                 }
                 out << "\n";
@@ -4362,7 +4352,7 @@ namespace Codegen{
                     }else if(auto ret = llvm::dyn_cast_if_present<llvm::ReturnInst>(&inst)){
                         if(ret->getNumOperands()>0){
                             out << "\tmov X0, ";
-                            emitOperand(ret->getOperand(0));
+                            emitReg(ret->getOperand(0));
                             out << "\n";
                         }
                         out << "\tadd sp, fp, " << stackAllocation <<"\n"; // deallocate stackframe (fp+stackAllocation gets back to old fp)

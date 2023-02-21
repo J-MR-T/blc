@@ -1197,8 +1197,8 @@ namespace ArgParse{
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
         const Arg llvm{      "l", "llvm"      , 0, "Output LLVM IR (mutually exclusive with p/d/u)"                                                      , false, true};
         const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
-        const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM IR"                                                          , false, true};
-        const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM IR"                                                            , false, true};
+        const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
+        const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
         const Arg asmout{    "a", "asm"       , 0, "Output (ARM-) assembly"                                                                              , false, true};
 
 
@@ -1217,7 +1217,7 @@ namespace ArgParse{
     } possible;
 
     void printHelp(){
-        std::cerr << "A Parser for a B like language" << std::endl;
+        std::cerr << "A Compiler for a B like language" << std::endl;
         std::cerr << "Usage: " << std::endl;
         for(auto& arg:possible){
             std::cerr << "  ";
@@ -1239,15 +1239,16 @@ namespace ArgParse{
             std::cerr << "    " << arg.description << std::endl;
         }
 
-        std::cerr << std::endl;
-        std::cerr << "Examples: " << std::endl;
-        std::cerr << "  "         << "main -i input.b -p -d -o output.dot" << std::endl;
-        std::cerr << "  "         << "main input.b -pd output.dot"         << std::endl;
-        std::cerr << "  "         << "main input.b -pdu"                   << std::endl;
-        std::cerr << "  "         << "main -lE input.b"                    << std::endl;
-        std::cerr << "  "         << "main -ls input.b"                    << std::endl;
-        std::cerr << "  "         << "main -sr input.b"                    << std::endl;
-        std::cerr << "  "         << "main -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there"                   << std::endl;
+        std::cerr << 
+        "\nExamples: \n"
+        << "  " << "main -i input.b -p -d -o output.dot\n"
+        << "  " << "main input.b -pd output.dot\n"
+        << "  " << "main input.b -pdu\n"
+        << "  " << "main -lE input.b\n"
+        << "  " << "main -l main.b main\n"
+        << "  " << "main -ls input.b\n"
+        << "  " << "main -sr input.b\n"
+        << "  " << "main -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there\n";
     }
 
     //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
@@ -1261,9 +1262,8 @@ namespace ArgParse{
         string argString = ss.str();
 
 
-        //handle positinoal args first, they have lower precedence
+        //handle positional args first, they have lower precedence
         //find them all, put them into a vector, then match them to the possible args
-        uint32_t actualPositon = 1;
         std::vector<string> positionalArgs{};
         for(int i = 1; i < argc; ++i){
             for(const auto& arg : possible){
@@ -1277,7 +1277,6 @@ namespace ArgParse{
             if(argv[i][0] != '-'){
                 // now we know its a positional arg
                 positionalArgs.emplace_back(argv[i]);
-                actualPositon++;
             }
 cont:
             continue;
@@ -1427,23 +1426,18 @@ namespace Codegen{
 
     llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept;
 
-    llvm::Value* wrapVarmapLookupForUse(llvm::IRBuilder<>& irb, ASTNode& node){
-        if(node.op == Token::Type::KW_REGISTER){
-            // this should be what we want for register vars, for auto vars we aditionally need to look up the alloca (and store it back if its an assignment, see the assignment below)
-            return varmapLookup(irb.GetInsertBlock(), node); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer isn't the value anymore, nothing is changed about what it's pointing to.
-        }else {
-            return irb.CreateLoad(i64, varmapLookup(irb.GetInsertBlock(), node), node.name);
-        }
-    }
-
     // for different block for lookup/insert
-    llvm::Value* wrapVarmapLookupForUse(llvm::BasicBlock* block, llvm::IRBuilder<>& irb, ASTNode& node){
+    llvm::Value* wrapVarmapLookupForUse(llvm::BasicBlock* block, llvm::IRBuilder<>& irb, ASTNode& node) noexcept{
         if(node.op == Token::Type::KW_REGISTER){
             // this should be what we want for register vars, for auto vars we aditionally need to look up the alloca (and store it back if its an assignment, see the assignment below)
             return varmapLookup(block, node); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer isn't the value anymore, nothing is changed about what it's pointing to.
         }else {
             return irb.CreateLoad(i64, varmapLookup(block, node), node.name);
         }
+    }
+
+    llvm::Value* wrapVarmapLookupForUse(llvm::IRBuilder<>& irb, ASTNode& node) noexcept{
+        return wrapVarmapLookupForUse(irb.GetInsertBlock(), irb, node);
     }
 
     // automatically creates phi nodes on demand
@@ -1597,7 +1591,7 @@ namespace Codegen{
                                 if(operandNode.type == ASTNode::Type::NExprVar){
                                     auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode);
                                     return irb.CreatePtrToInt(ptr, i64);
-                                }else{ /* has to be a subscript in this case, because of the SemanticAnalysis constarints */
+                                }else{ /* has to be a subscript in this case, because of the SemanticAnalysis constraints */
                                     // REFACTOR: would be nice to merge this with the code for loading from subscripts at some point, its almost the same
                                     auto& addrNode = *operandNode.children[0];
                                     auto& indexNode = *operandNode.children[1];
@@ -2342,7 +2336,7 @@ namespace Codegen::ISel{
                             patternQueue.pop();
 
                             covered.insert(current);
-                            
+
                             // add remaining operands to queue
                             // iterating over children means, that if they are empty, we ignore them, which is what we want
                             for(unsigned i = 0; i < currentPattern->children.size(); i++){
@@ -2720,6 +2714,7 @@ namespace Codegen::ISel{
         // remainder
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb) -> llvm::Value* {
+            // TODO sure this is right for negative numbers?
                 auto instr = &*irb.GetInsertPoint();
                 auto quotient = irb.CreateCall(instructionFunctions[ARM_sdiv],  {OP_N_MAT(instr,0), OP_N_MAT(instr,1)});
                 return irb.CreateCall(instructionFunctions[ARM_msub], {quotient, OP_N_MAT(instr,1), OP_N_MAT(instr,0)}); // remainder = numerator - (quotient * denominator)
@@ -2884,7 +2879,6 @@ namespace Codegen::ISel{
                 auto* gepInstr      = llvm::dyn_cast<llvm::GetElementPtrInst>(storeInst->getPointerOperand());
                 auto* intToPtrInstr = llvm::dyn_cast<llvm::IntToPtrInst>(gepInstr->getPointerOperand());
                 auto bitwidthOfStore = gepInstr->getResultElementType()->getIntegerBitWidth();
-                DEBUGLOG("storing value: " << *storeValue << " with bitwidth " << bitwidthOfStore)
                 
                 switch(bitwidthOfStore){
                 // args: value, base, offset, offsetshift
@@ -4242,6 +4236,7 @@ namespace Codegen{
         }
 
         void emitFunction(llvm::Function* f){
+            // TODO frame pointer chaining 
             currentFunction = f;
 
             emitPrologue(f);
@@ -4292,10 +4287,12 @@ namespace Codegen{
                         }
                         out << "\tadd sp, fp, " << stackAllocation <<"\n"; // deallocate stackframe (fp+stackAllocation gets back to old fp)
                         out << "\tldp fp, lr, [sp], 16\n";
+                        // TODO save restore cfi here
                         out << "\t.cfi_restore 30\n";
                         out << "\t.cfi_restore 29\n";
                         out << "\t.cfi_def_cfa sp, 0\n";
                         out << "\tret\n";
+
                     }else if(llvm::isa<llvm::BranchInst>(&inst) || llvm::isa<llvm::AllocaInst>(&inst) || llvm::isa<llvm::UnreachableInst>(&inst)){
                         // branches are simply ignored, they are explicitly converted to branch arm instructions in ISel
                         // allocas are ignored, they are handled in the prologue

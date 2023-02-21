@@ -254,12 +254,13 @@ public:
 
 };
 
+// TODO yeet all those stupid exceptions and compile with -fno-exceptions
 class ParsingException : public std::runtime_error {
     public:
         ParsingException(string msg) : std::runtime_error(msg){}
 };
 
-Token emptyToken{
+const Token emptyToken{
     Token::Type::EMPTY,
     ""
 };
@@ -3977,29 +3978,34 @@ namespace Codegen{
             out << "\t.cfi_endproc\n\n";
         }
 
+        template<int bitwidth>
+        static const char regPrefix; // 'X' or 'W'
+
         /// emits a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
         template<int bitwidth = 64>
         void emitReg(llvm::CallInst* call){
+            static_assert(bitwidth == 32 || bitwidth == 64, "bitwidth must be 32 or 64");
+
+            DEBUGLOG("emitting for call: " << *call)
             assert(call->hasMetadata("reg") && "instruction has no reg metadata");
             int regNum = dyn_cast<llvm::ConstantAsMetadata>(call->getMetadata("reg")->getOperand(0))->getValue()->getUniqueInteger().getZExtValue();
             // i hope the compiler optimizes this in the 2 generated cases, but i don't see why it wouldn't
-            if constexpr (bitwidth == 64){
-                out << "X" << regNum;
-            }else if(bitwidth == 32){
-                out << "W" << regNum;
-            }else{
-                static_assert(bitwidth == 64 || bitwidth == 32, "bitwidth for emitReg must be 32 or 64");
-            }
+            out << regPrefix<bitwidth> << regNum;
         }
 
         /// emits XZR, or a 32/64 bit register (Wn/Xn) using the metadata "reg n" on the instruction
         template<int bitwidth = 64>
         void emitReg(llvm::Value* v){
+            static_assert(bitwidth == 32 || bitwidth == 64, "bitwidth must be 32 or 64");
+
             if(v == XZR){
-                out << "XZR";
+                out << regPrefix<bitwidth> << "ZR";
             }else if(auto param = llvm::dyn_cast<llvm::Argument>(v)){
-                out << "X" << param->getArgNo();
-            }else {
+                out << regPrefix<bitwidth> << RegAlloc::llvmGetRegisterForArgument(param);
+            }else{
+                // TODO problem: this is called with allocas as args, we have to translate those to fp-relative addresses, and materialize them
+                // all of the others are handled in ptrtoint, but this cannot be done for phi nodes, as they use the ptr directly and store it somewhere (in the ARM_PSEUDO_str)
+                // the alternative would be to not do phis for ptrs
                 bool isCall = llvm::isa<llvm::CallInst>(v);
                 (void) isCall;
                 if(!isCall) {DEBUGLOG("not a call: " << *v)}
@@ -4021,19 +4027,13 @@ namespace Codegen{
             // - parameters -> have registers
             // 
 
+            // TODO extract the constant thing out to emitReg, less code
             if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(arg)){
                 // TODO this will be wrong for some things where there is actually a literal 0 required, i hope thats not often the case
                 if(constInt == XZR) out << "XZR";
                 else                out << constInt->getZExtValue();
-            }else if(auto call = llvm::dyn_cast<llvm::CallInst>(arg)){
-                emitReg(call);
-            }else if(auto param = llvm::dyn_cast<llvm::Argument>(arg)){
-                out << "X" << param->getArgNo();
             }else{
-
-
-                DEBUGLOG("cannot handle arg " << *arg)
-                EXIT_TODO_X("unhandled arg type");
+                emitReg(arg);
             }
         }
 
@@ -4394,6 +4394,12 @@ namespace Codegen{
         }
 
     };
+
+    template<>
+    char AssemblyGen::regPrefix<64> = 'X';
+
+    template<>
+    char AssemblyGen::regPrefix<32> = 'W';
 
 } // namespace Codegen::Asm
 

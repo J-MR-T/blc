@@ -20,6 +20,7 @@
 #include <queue>
 #include <list>
 #include <utility>
+
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <llvm/Config/llvm-config.h>
@@ -36,6 +37,35 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/IR/Dominators.h>
+
+// stuff I assume i need for writing object files...
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Support/Host.h>
+#include <llvm/ADT/Triple.h>
+#include <llvm/Object/Error.h>
+#include <llvm/Object/MachO.h>
+#include <llvm/Object/ObjectFile.h>
+#include <llvm/Object/SymbolicFile.h>
+#include <llvm/MC/MCObjectWriter.h>
+#include <llvm/MC/MCAsmBackend.h>
+#include <llvm/MC/MCAsmInfo.h>
+#include <llvm/MC/MCCodeEmitter.h>
+#include <llvm/MC/MCContext.h>
+#include <llvm/MC/MCInstrInfo.h>
+#include <llvm/MC/MCObjectWriter.h>
+#include <llvm/MC/MCRegisterInfo.h>
+#include <llvm/MC/MCSubtargetInfo.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/MC/MCTargetOptions.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/MC/MCTargetOptionsCommandFlags.h>
+#include <llvm/Support/CommandLine.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/InitLLVM.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/ToolOutputFile.h>
 #pragma GCC diagnostic pop
 
 using std::string;
@@ -1195,7 +1225,7 @@ namespace ArgParse{
         const Arg nosemantic{"n", "nosemantic", 0, "Don't run semantic analysis on the AST"                                                              , false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
-        const Arg llvm{      "l", "llvm"      , 0, "Output LLVM IR (mutually exclusive with p/d/u)"                                                      , false, true};
+        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o ." , false, true};
         const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
         const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
         const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
@@ -4318,6 +4348,7 @@ namespace Codegen{
 } // namespace Codegen::Asm
 
 int main(int argc, char *argv[]) {
+    // TODO check https://www.llvm.org/docs/Frontend/PerformanceTips.html at some point
 #define MEASURE_TIME_START(point) auto point ## _start = std::chrono::high_resolution_clock::now()
 
 #define MEASURE_TIME_END(point) auto point ## _end = std::chrono::high_resolution_clock::now()
@@ -4416,12 +4447,99 @@ int main(int argc, char *argv[]) {
         if(parsedArgs.contains(ArgParse::possible.output)){
             llvmOut = llvmOutFileToClose = new llvm::raw_fd_ostream(parsedArgs.at(ArgParse::possible.output), errorCode);
         }
+
+        auto close = [&](){
+            if(llvmOutFileToClose != nullptr){
+                llvmOutFileToClose->close();
+                delete llvmOut;
+            }
+            devNull.close();
+        };
+
         MEASURE_TIME_START(codegen);
         if(!(genSuccess = Codegen::generate(*ast, parsedArgs.contains(ArgParse::possible.llvm) ? llvmOut : nullptr))){
             llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
+            close();
+            goto continu;
         }
         MEASURE_TIME_END(codegen);
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
+
+        if(parsedArgs.contains(ArgParse::possible.output)){
+            // adapted from https://www.llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl08.html
+            llvm::InitializeAllTargetInfos();
+            llvm::InitializeAllTargets();
+            llvm::InitializeAllTargetMCs();
+            llvm::InitializeAllAsmParsers();
+            llvm::InitializeAllAsmPrinters();
+
+            auto targetTriple = llvm::sys::getDefaultTargetTriple();
+            Codegen::moduleUP->setTargetTriple(targetTriple);
+
+            std::string error;
+            auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
+
+            // Print an error and exit if we couldn't find the requested target.
+            // This generally occurs if we've forgotten to initialise the
+            // TargetRegistry or we have a bogus target triple.
+            if (!target) {
+                llvm::errs() << error;
+                close();
+                goto continu;
+            }
+
+            auto CPU = "generic";
+            auto features = "";
+            auto tempObjFileName = parsedArgs.at(ArgParse::possible.output) + ".o-XXXXXX";
+            auto tempObjFileFD = mkstemp(tempObjFileName.data());
+
+            llvm::TargetOptions opt;
+            auto RM = llvm::Optional<llvm::Reloc::Model>();
+            auto targetMachine = target->createTargetMachine(targetTriple, CPU, features, opt, RM);
+
+            Codegen::moduleUP->setDataLayout(targetMachine->createDataLayout());
+
+            std::error_code ec;
+            llvm::raw_fd_ostream dest(tempObjFileFD, true);
+
+            if(ec){
+                llvm::errs() << "Could not open file: " << ec.message();
+                close();
+                goto continu;
+            }
+
+            // old pass manager for backend
+            llvm::legacy::PassManager pass;
+            auto fileType = llvm::CGFT_ObjectFile;
+            
+            if(targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)){
+                llvm::errs() << "TargetMachine can't emit a file of this type";
+                close();
+                goto continu;
+            }
+
+            
+            pass.run(*Codegen::moduleUP);
+            dest.flush();
+
+            // link
+            
+            pid_t pid;
+            if((pid=fork())==0){
+                // child
+                const char *const args[] = {"ld", "-o", parsedArgs.at(ArgParse::possible.output).c_str(), tempObjFileName.c_str(), 
+                    "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o", nullptr};
+                int err = execvp("ld", const_cast<char *const *>(args));
+                if(err == -1){
+                    llvm::errs() << "Failed to execv ld: " << strerror(errno) << "\n";
+                }
+                exit(EXIT_FAILURE);
+            }
+            // parent (execv should never return, and if it does, the child will exit(1)))
+
+            close();
+            goto continu;
+        }
 
         // isel 
         MEASURE_TIME_START(isel);
@@ -4441,12 +4559,9 @@ int main(int argc, char *argv[]) {
         MEASURE_TIME_END(asm);
         asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
 
-        if(llvmOutFileToClose != nullptr){
-            llvmOutFileToClose->close();
-            delete llvmOut;
-        }
-        devNull.close();
+        close();
     }
+continu:
 
     //print execution times
     if(parsedArgs.contains(ArgParse::possible.benchmark)){

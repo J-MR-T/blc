@@ -257,10 +257,8 @@ public:
         return type == other.type && value == other.value;
     }
 
-    // this is unbelievably ugly, but i need it in the following expression constructor
-    string empty(){
-        return "";
-    }
+    // includes implicit conversion from type to Token
+    Token(Type type, string value = "") : type(type), value(value) {}
 
 };
 
@@ -279,13 +277,27 @@ class Tokenizer{
 public:
 
 class UnexpectedTokenException :  public ParsingException {
+
+    static std::string exceptionString(Tokenizer& tokenizer, Token::Type expected){
+        tokenizer.peekToken();
+        std::string typeHint = "";
+        if((tokenizer.peeked).type == Token::Type::NUM || (tokenizer.peeked).type == Token::Type::IDENTIFIER){
+            typeHint = " (type: " + Token::toString((tokenizer.peeked).type) + ")";
+        }
+        std::string expectedHint = "";
+        if(expected != Token::Type::EMPTY){
+            expectedHint = ", expected: " + Token::toString(expected);
+        }
+
+        return "Line " + std::to_string(tokenizer.getLineNum()) + ": "
+            + "Unexpected token: " + (tokenizer.peeked).toString() 
+            + typeHint
+            + expectedHint;
+    }
+
     public:
-        UnexpectedTokenException(Tokenizer& tokenizer, Token::Type expected = Token::Type::EMPTY) : ParsingException(
-                  tokenizer.peekToken().empty() // very ugly, but it is so the token is peeked and can be accessed later, together with the accurate line number
-                + "Line " + std::to_string(tokenizer.getLineNum()) + ": "
-                + "Unexpected token: " + (tokenizer.peeked).toString() + (((tokenizer.peeked).type==Token::Type::NUM || (tokenizer.peeked).type == Token::Type::IDENTIFIER)?" (type: "+Token::toString((tokenizer.peeked).type)+")" : "") 
-                + (expected != Token::Type::EMPTY ? (", expected: ") + Token::toString(expected):"")
-                ){ }
+        UnexpectedTokenException(Tokenizer& tokenizer, Token::Type expected = Token::Type::EMPTY) 
+            : ParsingException(exceptionString(tokenizer, expected)) {}
 };
 
     static string initProg(std::ifstream& inputFile){
@@ -314,19 +326,19 @@ class UnexpectedTokenException :  public ParsingException {
     Token matched;
 
     Token peekToken(){
-#define RET(type) peeked = Token{type}; return peeked;
-#define RET_NAME(type,name) peeked = Token{type, name}; return peeked;
+        using Type = Token::Type;
+
         if(peeked == emptyToken){
             if(progI == string::npos || progI>=prog.size()){
                 //return EOP token
-                RET(Token::Type::EOP);
+                return peeked = Type::EOP;
             }
 
             // skip whitespace & comments 
             while(true){
                 progI=prog.find_first_not_of(" \f\n\r\t\v", progI); // same chars as isspace uses
                 if(progI == string::npos || progI>=prog.size()){
-                    RET(Token::Type::EOP);
+                    return peeked = Type::EOP;
                 }
 
 
@@ -338,7 +350,7 @@ class UnexpectedTokenException :  public ParsingException {
                         progI=prog.find(newline, progI);
                         progI+=newline.size();
                     }else if(progI+1 >= prog.size()){
-                        RET(Token::Type::EOP);
+                        return peeked = Type::EOP;
                     }else{
                         break;
                     }
@@ -349,7 +361,7 @@ class UnexpectedTokenException :  public ParsingException {
 
             if(prog.size()-progI <= 0){
                 //return EOP token
-                RET(Token::Type::EOP);
+                return peeked = Type::EOP;
             }
 
 
@@ -359,7 +371,7 @@ class UnexpectedTokenException :  public ParsingException {
                 if(std::regex_search(prog.cbegin()+progI, prog.cend(), match, numberRegex)){
                     string numStr = match[0];
                     progI += numStr.size();
-                    RET_NAME(Token::Type::NUM, numStr);
+                    return peeked = {Type::NUM, numStr};
                 }
             }
 
@@ -371,135 +383,135 @@ class UnexpectedTokenException :  public ParsingException {
                     progI += idStr.size();
                     //check if it's a keyword
                     if(keywords.contains(idStr)){
-                        RET(keywords.at(idStr));
+                        return peeked = keywords.at(idStr);
                     }else{
-                        RET_NAME(Token::Type::IDENTIFIER, idStr);
+                        return peeked = {Type::IDENTIFIER, idStr};
                     }
                 }
             }
 
             //single characters
-            Token::Type type = Token::Type::EMPTY;
+            Type type = Token::Type::EMPTY;
             //parentheses, brackets, braces, unabiguous operators, ...
             switch(prog[progI]){
                 case '(':
-                    type = Token::Type::L_PAREN;
+                    type = Type::L_PAREN;
                     break;
                 case ')':
-                    type = Token::Type::R_PAREN;
+                    type = Type::R_PAREN;
                     break;
                 case '[':
-                    type = Token::Type::L_BRACKET;
+                    type = Type::L_BRACKET;
                     break;
                 case ']':
-                    type = Token::Type::R_BRACKET;
+                    type = Type::R_BRACKET;
                     break;
                 case '{':
-                    type = Token::Type::L_BRACE;
+                    type = Type::L_BRACE;
                     break;
                 case '}':
-                    type = Token::Type::R_BRACE;
+                    type = Type::R_BRACE;
                     break;
                 case '~':
-                    type = Token::Type::TILDE;
+                    type = Type::TILDE;
                     break;
                 case '^':
-                    type = Token::Type::BITWISE_XOR;
+                    type = Type::BITWISE_XOR;
                     break;
                 case '@':
-                    type = Token::Type::AT;
+                    type = Type::AT;
                     break;
                 case '+':
-                    type = Token::Type::PLUS;
+                    type = Type::PLUS;
                     break;
                 case '-':
-                    type = Token::Type::MINUS;
+                    type = Type::MINUS;
                     break;
                 case '*':
-                    type = Token::Type::TIMES;
+                    type = Type::TIMES;
                     break;
                 case '/':
-                    type = Token::Type::DIV;
+                    type = Type::DIV;
                     break;
                 case '%':
-                    type = Token::Type::MOD;
+                    type = Type::MOD;
                     break;
                 case ';':
-                    type = Token::Type::SEMICOLON;
+                    type = Type::SEMICOLON;
                     break;
                 case ',':
-                    type = Token::Type::COMMA;
+                    type = Type::COMMA;
                     break;
             }
 
-            if(type!=Token::Type::EMPTY){
+            if(type!=Type::EMPTY){
                 progI++;
-                RET(type);
+                return peeked = type;
             }
 
             //two characters
             if(prog.size()-progI >= 2){
                 //shift operators
                 if(prog[progI+0] == '<' && prog[progI+1] == '<'){
-                    type = Token::Type::SHIFTL;
+                    type = Type::SHIFTL;
                 }
                 if(prog[progI+0] == '>' && prog[progI+1] == '>'){
-                    type = Token::Type::SHIFTR;
+                    type = Type::SHIFTR;
                 }
 
                 //comparison operators
                 if(prog[progI+0] == '<' && prog[progI+1] == '='){
-                    type = Token::Type::LESS_EQUAL;
+                    type = Type::LESS_EQUAL;
                 }
                 if(prog[progI+0] == '>' && prog[progI+1] == '='){
-                    type = Token::Type::GREATER_EQUAL;
+                    type = Type::GREATER_EQUAL;
                 }
                 if(prog[progI+0] == '=' && prog[progI+1] == '='){
-                    type = Token::Type::EQUAL;
+                    type = Type::EQUAL;
                 }
                 if(prog[progI+0] == '!' && prog[progI+1] == '='){
-                    type = Token::Type::NOT_EQUAL;
+                    type = Type::NOT_EQUAL;
                 }
 
                 //boolean operators
                 if(prog[progI+0] == '&' && prog[progI+1] == '&'){
-                    type = Token::Type::LOGICAL_AND;
+                    type = Type::LOGICAL_AND;
                 }
                 if(prog[progI+0] == '|' && prog[progI+1] == '|'){
-                    type = Token::Type::LOGICAL_OR;
+                    type = Type::LOGICAL_OR;
                 }
 
-                if(type!=Token::Type::EMPTY){
+                if(type!=Type::EMPTY){
                     progI += 2;
-                    RET(type);
+                    return peeked = type;
                 }
             }
 
             //ambiguous one character operators, ambiguity has been cleared by previous ifs
             switch(prog[progI+0]){
                 case '<':
-                    type = Token::Type::LESS;
+                    type = Type::LESS;
                     break;
                 case '>':
-                    type = Token::Type::GREATER;
+                    type = Type::GREATER;
                     break;
                 case '=':
-                    type = Token::Type::ASSIGN;
+                    type = Type::ASSIGN;
                     break;
                 case '&':
-                    type = Token::Type::AMPERSAND;
+                    type = Type::AMPERSAND;
                     break;
                 case '|':
-                    type = Token::Type::BITWISE_OR;
+                    type = Type::BITWISE_OR;
                     break;
                 case '!':
-                    type = Token::Type::LOGICAL_NOT;
+                    type = Type::LOGICAL_NOT;
                     break;
             }
 
-            if(type!=Token::Type::EMPTY){
+            if(type!=Type::EMPTY){
                 progI++;
-                RET(type);
+                return peeked = type;
             }
 
             //invalid character

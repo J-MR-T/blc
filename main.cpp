@@ -21,6 +21,8 @@
 #include <list>
 #include <utility>
 
+#include <err.h>
+
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <llvm/Config/llvm-config.h>
@@ -80,16 +82,24 @@ using std::unique_ptr;
 #define STRINGIZE(x) #x
 #define STRINGIZE_MACRO(x) STRINGIZE(x)
 
-// exit status 2 for 2do :)
-#define EXIT_TODO                                                                      \
-    llvm::errs() << "TODO(Line " STRINGIZE_MACRO(__LINE__) "): Not implemented yet\n"; \
-    exit(2);
+// kind of an enum class but implicitly convertible to int
+namespace ExitCode{
+enum {
+    SUCCESS = 0,
+    ERROR = 1,
+    TODO = 2, // exit status 2 for 2do :)
+    ERROR_IO = ERROR | 1 << 2,
+    ERROR_SYNTAX = ERROR | 1 << 3,
+    ERROR_CODEGEN = ERROR | 1 << 4,
+    ERROR_LINK = ERROR | 1 << 5,
+};
+}
 
-#define EXIT_TODO_X(x)                                                         \
-    llvm::errs() << "TODO(Line " STRINGIZE_MACRO(__LINE__) "): " << x << "\n"; \
-    exit(2);
+#define EXIT_TODO_X(x) \
+    errx(ExitCode::TODO, "TODO(Line " STRINGIZE_MACRO(__LINE__) "): " x "\n");
 
-// search for "HW 9" to find the start of the new code (although there have been probably 50 bugfixes for regalloc and 5 for isel too...)
+#define EXIT_TODO EXIT_TODO_X("Not implemented yet.")
+
 
 struct Token{
 public:
@@ -1349,7 +1359,7 @@ cont:
 
         if(missingRequired){
             printHelp();
-            exit(EXIT_FAILURE);
+            exit(ExitCode::ERROR);
         }
         return parsedArgs;
     }
@@ -1406,12 +1416,12 @@ namespace Codegen{
         return llvm::dyn_cast<llvm::MDString>(inst->getMetadata(mdName)->getOperand(0))->getString();
     }
 
-    void            llvmSetStringMetadata(llvm::Instruction* inst, llvm::StringRef mdName, llvm::StringRef val){
+    void llvmSetStringMetadata(llvm::Instruction* inst, llvm::StringRef mdName, llvm::StringRef val){
         llvm::MDNode* md = llvm::MDNode::get(ctx, llvm::MDString::get(ctx, val));
         inst->setMetadata(mdName, md);
     }
 
-    void            llvmSetEmptyMetadata(llvm::Instruction* inst, llvm::StringRef mdName){
+    void llvmSetEmptyMetadata(llvm::Instruction* inst, llvm::StringRef mdName){
         inst->setMetadata(mdName, llvm::MDNode::get(ctx, {}));
     }
 
@@ -1559,7 +1569,7 @@ namespace Codegen{
         }else if(sizespecInt == 8){
             type = irb.getInt64Ty();
         }else{
-            throw std::runtime_error("Something has gone seriously wrong here, got a sizespec of " + std::to_string(sizespecInt) + " bytes");
+            errx(ExitCode::ERROR_CODEGEN, "Something has gone seriously wrong here, got a sizespec of %ld bytes", sizespecInt);
         }
         return type;
     }
@@ -2544,6 +2554,7 @@ namespace Codegen{
 } // namespace Codegen
 
 namespace Codegen::ISel{
+    // TODO is there any way to make this nicer? The patterns themselves have so much 'similar' code, but its hard to factor out into something common
 
 /// always inserts a mov to materialize the given constant
 #define MAT_CONST(value) irb.CreateCall(instructionFunctions[ARM_mov], {value})
@@ -2811,8 +2822,7 @@ namespace Codegen::ISel{
                     case 32:
                         return irb.CreateCall(instructionFunctions[ARM_ldr_sw], {OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
                     default: // on 64, the sext is not created by llvm:
-                        llvm::errs() << "Fatal pattern matching error during ISel: sext of load with bitwidth " << bitwidthOfLoad << " not supported\n";
-                        exit(EXIT_FAILURE);
+                        errx(ExitCode::ERROR_CODEGEN, "Fatal pattern matching error during ISel: sext of load with bitwidth %d not supported", bitwidthOfLoad);
                 }
             },
             llvm::Instruction::SExt,
@@ -2875,8 +2885,7 @@ namespace Codegen::ISel{
                     case 32:
                         return irb.CreateCall(instructionFunctions[ARM_str32], {OP_N_MAT(truncInstr,0), OP_N_MAT(intToPtrInstr,0), OP_N_MAT(gepInstr,1), irb.getInt8(2)});
                     default: // on 64, the trunc is not created by llvm:
-                        llvm::errs() << "Fatal pattern matching error during ISel: trunc of store with bitwidth " << bitwidthOfStore << " not supported\n";
-                        exit(EXIT_FAILURE);
+                        errx(ExitCode::ERROR_CODEGEN, "Fatal pattern matching error during ISel: trunc of store with bitwidth %d not supported", bitwidthOfStore);
                 }
             },
             llvm::Instruction::Store,
@@ -2922,8 +2931,7 @@ namespace Codegen::ISel{
                     case 64:
                         return irb.CreateCall(instructionFunctions[ARM_str], {MAYBE_MAT_CONST(storeValue), OP_N_MAT(intToPtrInstr, 0), OP_N_MAT(gepInstr,1), irb.getInt8(3)}); // shift by 3 for multiplying by 8
                     default: 
-                        llvm::errs() << "Fatal pattern matching error during ISel: trunc of store with bitwidth " << bitwidthOfStore << " not supported\n";
-                        exit(EXIT_FAILURE);
+                        errx(ExitCode::ERROR_CODEGEN, "Fatal pattern matching error during ISel: trunc of store with bitwidth %d not supported", bitwidthOfStore);
                 }
             },
             llvm::Instruction::Store,
@@ -2967,16 +2975,16 @@ namespace Codegen::ISel{
                 auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrToInt->getPointerOperand());
                 auto* intToPtr = llvm::dyn_cast<llvm::IntToPtrInst>(gep->getOperand(0));
 
-                unsigned shiftInt = 0;
                 int bitwidth = gep->getSourceElementType()->getIntegerBitWidth();
+                unsigned shiftInt = 0;
+                // TODO transform into log2 + sub
                 switch(bitwidth){
                     case 8: shiftInt = 0; break;
                     case 16: shiftInt = 1; break;
                     case 32: shiftInt = 2; break;
                     case 64: shiftInt = 3; break;
                     default:
-                        llvm::errs() << "Fatal pattern matching error during ISel: subscript with bitwidth " << bitwidth << " not supported\n";
-                        exit(EXIT_FAILURE);
+                        errx(ExitCode::ERROR_CODEGEN, "Fatal pattern matching error during ISel: subscript with bitwidth %d not supported", bitwidth);
                 }
 
                 auto indexOp = OP_N(gep, 1);
@@ -4257,7 +4265,7 @@ int main(int argc, char *argv[]) {
     MEASURE_TIME_END(semanalyze);
 
     if(parser.failed || SemanticAnalysis::failed){
-        return EXIT_FAILURE;
+        return ExitCode::ERROR_SYNTAX;
     }
 
     bool genSuccess = false;
@@ -4375,11 +4383,9 @@ int main(int argc, char *argv[]) {
                 // child
                 const char *const args[] = {"ld", "-o", parsedArgs.at(ArgParse::possible.output).c_str(), tempObjFileName.c_str(), 
                     "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o", nullptr};
-                int err = execvp("ld", const_cast<char *const *>(args));
-                if(err == -1){
-                    llvm::errs() << "Failed to execv ld: " << strerror(errno) << "\n";
-                }
-                exit(EXIT_FAILURE);
+                execvp("ld", const_cast<char *const *>(args));
+                llvm::errs() << "Failed to execv ld: " << strerror(errno) << "\n";
+                exit(ExitCode::ERROR_IO | ExitCode::ERROR_LINK);
             }
             // parent (execv should never return, and if it does, the child will exit(1)))
 
@@ -4387,7 +4393,7 @@ int main(int argc, char *argv[]) {
             goto continu;
         }
 
-        // isel 
+        // isel
         MEASURE_TIME_START(isel);
         Codegen::ISel::doISel(parsedArgs.contains(ArgParse::possible.isel) ? llvmOut : nullptr);
         MEASURE_TIME_END(isel);
@@ -4420,7 +4426,7 @@ continu:
         std::cout << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB" << std::endl;
     }
 
-    if(!genSuccess) return EXIT_FAILURE;
+    if(!genSuccess) return ExitCode::ERROR;
 
-    return EXIT_SUCCESS;
+    return ExitCode::SUCCESS;
 }

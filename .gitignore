@@ -2,6 +2,7 @@
 
 compile_commands.json
 main
+bc
 .cache/**
 
 *-037*

@@ -2343,7 +2343,6 @@ namespace Codegen::ISel{
 
     std::unordered_set<unsigned> skippableTypes{
         llvm::Instruction::Ret,
-        llvm::Instruction::Call,
         llvm::Instruction::Unreachable,
         llvm::Instruction::PHI,
         llvm::Instruction::Alloca,
@@ -3225,6 +3224,20 @@ namespace Codegen::ISel{
             {
                 {llvm::Instruction::PHI, {}, true}
             }
+        ),
+
+        Pattern::make_root(
+            [](llvm::IRBuilder<>& irb) -> llvm::Value* {
+                auto* call = llvm::dyn_cast<llvm::CallInst>(&*irb.GetInsertPoint());
+                for(auto& arg: call->args())
+                    if(llvm::isa<llvm::ConstantInt>(arg.get()))
+                        call->replaceUsesOfWith(arg.get(), MAT_CONST(arg.get()));
+                
+
+                return call;
+            },
+            llvm::Instruction::Call, // need to materialize the operands
+            {}
         ),
     };
 

@@ -1270,7 +1270,7 @@ namespace ArgParse{
         }
     } possible;
 
-    void printHelp(){
+    void printHelp(const char* argv0){
         std::cerr << "A Compiler for a B like language" << std::endl;
         std::cerr << "Usage: " << std::endl;
         for(auto& arg:possible){
@@ -1295,14 +1295,14 @@ namespace ArgParse{
 
         std::cerr << 
         "\nExamples: \n"
-        << "  " << "main -i input.b -p -d -o output.dot\n"
-        << "  " << "main input.b -pd output.dot\n"
-        << "  " << "main input.b -pdu\n"
-        << "  " << "main -lE input.b\n"
-        << "  " << "main -l main.b main\n"
-        << "  " << "main -ls input.b\n"
-        << "  " << "main -sr input.b\n"
-        << "  " << "main -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there\n";
+        << "  " << argv0 << " -i input.b -p -d -o output.dot\n"
+        << "  " << argv0 << " input.b -pd output.dot\n"
+        << "  " << argv0 << " input.b -pdu\n"
+        << "  " << argv0 << " -lE input.b\n"
+        << "  " << argv0 << " -l main.b main\n"
+        << "  " << argv0 << " -ls input.b\n"
+        << "  " << argv0 << " -sr input.b\n"
+        << "  " << argv0 << " -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there\n";
     }
 
     //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
@@ -1371,7 +1371,7 @@ cont:
         }
 
         if(missingRequired){
-            printHelp();
+            printHelp(argv[0]);
             exit(ExitCode::ERROR);
         }
         return parsedArgs;
@@ -4259,8 +4259,8 @@ int main(int argc, char *argv[]) {
     auto parsedArgs = ArgParse::parse(argc, argv);
 
     if(parsedArgs.contains(ArgParse::possible.help)){
-        ArgParse::printHelp();
-        return 0;
+        ArgParse::printHelp(argv[0]);
+        return ExitCode::SUCCESS;
     }
 
     std::string inputFilename = parsedArgs.at(ArgParse::possible.input);
@@ -4270,8 +4270,7 @@ int main(int argc, char *argv[]) {
     }
 
     if(access(inputFilename.c_str(),R_OK) != 0){
-        perror("Could not open input file");
-        return 1;
+        err(ExitCode::ERROR_IO, "Could not open input file %s", inputFilename.c_str());
     }
 
     std::ifstream inputFile{inputFilename};
@@ -4448,7 +4447,7 @@ continu:
         std::cout << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB" << std::endl;
     }
 
-    if(!genSuccess) return ExitCode::ERROR;
+    if(!genSuccess) return ExitCode::ERROR_CODEGEN;
 
     return ExitCode::SUCCESS;
 }

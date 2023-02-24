@@ -1248,7 +1248,8 @@ namespace ArgParse{
         const Arg nosemantic{"n", "nosemantic", 0, "Don't run semantic analysis on the AST"                                                              , false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
-        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o ." , false, true};
+        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o.\n"
+                                                   "Disables the rest of the compilation process"                                                        , false, true};
         const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
         const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
         const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
@@ -4213,6 +4214,39 @@ namespace Codegen{
 
 } // namespace Codegen::Asm
 
+template<typename T>
+concept char_ptr = requires(T t){
+    {t[0]} -> std::convertible_to<const char>;
+};
+
+int execute(const std::string& command, char_ptr auto&&... commandArgs){
+    pid_t pid;
+
+    auto convToCharPtr = [](auto& arg) -> const char *{
+        if constexpr(std::is_same_v<std::decay_t<decltype(arg)>, std::string>)
+            return arg.c_str();
+        else 
+            return arg;
+    };
+
+    if((pid=fork())==0){
+        // child
+        const char *const args[] = {command.c_str(), convToCharPtr(commandArgs)..., nullptr};
+        execvp(command.c_str(), const_cast<char *const *>(args));
+        llvm::errs() << "Failed to execvp " << command.c_str() << ": " << strerror(errno) << "\n";
+        return ExitCode::ERROR_IO | ExitCode::ERROR_LINK;
+    }
+
+    // parent
+    int wstatus;
+    wait(&wstatus);
+    if(!WIFEXITED(wstatus)){
+        llvm::errs() << command << " did not exit normally\n";
+        return ExitCode::ERROR_LINK;
+    }
+    return ExitCode::SUCCESS;
+}
+
 int main(int argc, char *argv[]) {
     // TODO check https://www.llvm.org/docs/Frontend/PerformanceTips.html at some point
 #define MEASURE_TIME_START(point) auto point ## _start = std::chrono::high_resolution_clock::now()
@@ -4245,13 +4279,9 @@ int main(int argc, char *argv[]) {
 
     auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
     if(parsedArgs.contains(ArgParse::possible.preprocess)){
-        //this is a bit ugly, but it works
-        std::stringstream ss;
-
-        ss << "cpp -E -P " << parsedArgs.at(ArgParse::possible.input) << " > /tmp/" << epochsecs << ".bpreprocessed";
-        system(ss.str().c_str());
-
         preprocessedFilePath="/tmp/" + std::to_string(epochsecs) + ".bpreprocessed";
+        execute("cpp", "-E", "-P", parsedArgs.at(ArgParse::possible.input), "-o", preprocessedFilePath);
+
         inputFile = std::ifstream{preprocessedFilePath};
     }
 
@@ -4307,25 +4337,13 @@ int main(int argc, char *argv[]) {
         }
     }else {
         std::error_code errorCode;
-        llvm::raw_ostream* llvmOut = &llvm::outs();
-        llvm::raw_fd_ostream* llvmOutFileToClose = nullptr;
+        std::string outfile = parsedArgs.contains(ArgParse::possible.output) ? parsedArgs.at(ArgParse::possible.output) : "";
+        llvm::raw_fd_ostream llvmOut = llvm::raw_fd_ostream(outfile == ""? "-" : outfile, errorCode);
         llvm::raw_fd_ostream devNull = llvm::raw_fd_ostream("/dev/null", errorCode);
-        if(parsedArgs.contains(ArgParse::possible.output)){
-            llvmOut = llvmOutFileToClose = new llvm::raw_fd_ostream(parsedArgs.at(ArgParse::possible.output), errorCode);
-        }
-
-        auto close = [&](){
-            if(llvmOutFileToClose != nullptr){
-                llvmOutFileToClose->close();
-                delete llvmOut;
-            }
-            devNull.close();
-        };
 
         MEASURE_TIME_START(codegen);
-        if(!(genSuccess = Codegen::generate(*ast, parsedArgs.contains(ArgParse::possible.llvm) ? llvmOut : nullptr))){
+        if(!(genSuccess = Codegen::generate(*ast, parsedArgs.contains(ArgParse::possible.llvm) ? &llvmOut : nullptr))){
             llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
-            close();
             goto continu;
         }
         MEASURE_TIME_END(codegen);
@@ -4350,7 +4368,6 @@ int main(int argc, char *argv[]) {
             // TargetRegistry or we have a bogus target triple.
             if (!target) {
                 llvm::errs() << error;
-                close();
                 goto continu;
             }
 
@@ -4365,65 +4382,58 @@ int main(int argc, char *argv[]) {
 
             Codegen::moduleUP->setDataLayout(targetMachine->createDataLayout());
 
-            std::error_code ec;
-            llvm::raw_fd_ostream dest(tempObjFileFD, true);
+            {
+                std::error_code ec;
+                llvm::raw_fd_ostream dest(tempObjFileFD, true);
 
-            if(ec){
-                llvm::errs() << "Could not open file: " << ec.message();
-                close();
-                goto continu;
+                if(ec){
+                    llvm::errs() << "Could not open file: " << ec.message();
+                    goto continu;
+                }
+
+                // old pass manager for backend
+                llvm::legacy::PassManager pass;
+                auto fileType = llvm::CGFT_ObjectFile;
+
+                if(targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)){
+                    llvm::errs() << "TargetMachine can't emit a file of this type";
+                    goto continu;
+                }
+
+
+                pass.run(*Codegen::moduleUP);
+                dest.flush();
             }
-
-            // old pass manager for backend
-            llvm::legacy::PassManager pass;
-            auto fileType = llvm::CGFT_ObjectFile;
-            
-            if(targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)){
-                llvm::errs() << "TargetMachine can't emit a file of this type";
-                close();
-                goto continu;
-            }
-
-            
-            pass.run(*Codegen::moduleUP);
-            dest.flush();
 
             // link
-            
-            pid_t pid;
-            if((pid=fork())==0){
-                // child
-                const char *const args[] = {"ld", "-o", parsedArgs.at(ArgParse::possible.output).c_str(), tempObjFileName.c_str(), 
-                    "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o", nullptr};
-                execvp("ld", const_cast<char *const *>(args));
-                llvm::errs() << "Failed to execv ld: " << strerror(errno) << "\n";
-                exit(ExitCode::ERROR_IO | ExitCode::ERROR_LINK);
-            }
-            // parent (execv should never return, and if it does, the child will exit(1)))
+            if(auto ret = execute("ld", 
+                    "-o", parsedArgs.at(ArgParse::possible.output).c_str(),
+                    tempObjFileName.c_str(),
+                    "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o");
+                ret != ExitCode::SUCCESS)
+                return ret;
 
-            close();
-            goto continu;
+            std::filesystem::remove(tempObjFileName);
+
+        }else if(!parsedArgs.contains(ArgParse::possible.llvm)){
+            // isel
+            MEASURE_TIME_START(isel);
+            Codegen::ISel::doISel(parsedArgs.contains(ArgParse::possible.isel) ? &llvmOut : nullptr);
+            MEASURE_TIME_END(isel);
+            iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
+
+            // regalloc
+            MEASURE_TIME_START(regalloc);
+            Codegen::RegAlloc::doRegAlloc(parsedArgs.contains(ArgParse::possible.regalloc) ? &llvmOut : nullptr);
+            MEASURE_TIME_END(regalloc);
+            regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
+
+            // asm
+            MEASURE_TIME_START(asm);
+            (Codegen::AssemblyGen(parsedArgs.contains(ArgParse::possible.asmout) ? &llvmOut : &devNull)).doAsmOutput();
+            MEASURE_TIME_END(asm);
+            asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
         }
-
-        // isel
-        MEASURE_TIME_START(isel);
-        Codegen::ISel::doISel(parsedArgs.contains(ArgParse::possible.isel) ? llvmOut : nullptr);
-        MEASURE_TIME_END(isel);
-        iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
-
-        // regalloc
-        MEASURE_TIME_START(regalloc);
-        Codegen::RegAlloc::doRegAlloc(parsedArgs.contains(ArgParse::possible.regalloc) ? llvmOut : nullptr);
-        MEASURE_TIME_END(regalloc);
-        regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
-
-        // asm
-        MEASURE_TIME_START(asm);
-        (Codegen::AssemblyGen(parsedArgs.contains(ArgParse::possible.asmout) ? llvmOut : &devNull)).doAsmOutput();
-        MEASURE_TIME_END(asm);
-        asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
-
-        close();
     }
 continu:
 

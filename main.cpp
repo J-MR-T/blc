@@ -20,8 +20,10 @@
 #include <queue>
 #include <list>
 #include <utility>
+#include <filesystem>
 
 #include <err.h>
+#include <sys/wait.h>
 
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -1469,7 +1471,7 @@ namespace Codegen{
 
 
     // REFACTOR: cache the result in a hash map
-    llvm::Function* findFunction(string name){
+    llvm::Function* findFunction(string& name){
         auto fnIt = llvm::find_if(moduleUP->functions(), [&name](auto& func){return func.getName() == name;});
         if(fnIt == moduleUP->functions().end()){
             return nullptr;
@@ -1507,8 +1509,7 @@ namespace Codegen{
                 if(block->hasNPredecessors(1)){
                     return varmap[name] = varmapLookup(block->getSinglePredecessor(), node);
                 }else if(block->hasNPredecessors(0)){
-                    // returning poison is quite reasonable, as anything here should never be used, or looked up (entry block case)
-                    warn("Variable " + name + " is used before it is defined");
+                    // returning poison is quite reasonable, as anything here should never be used, or looked up (either unreachable, or entry block)
                     return varmap[name] = llvm::PoisonValue::get(valueType);
                 }else{ // > 1 predecessors
                     // create phi node to merge it
@@ -1518,7 +1519,7 @@ namespace Codegen{
                     if(nonphi!=nullptr){
                         irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                     }
-                    llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo, 2 because we have >1 preds
+                    llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, it's at least one because of our algo, 2 because we have >1 preds
                     varmap[name] = phi; // doing this here breaks a potential cycle in the following lookup, if we look up this same name and it points back here, we don't create another phi node, we use the existing one we just created
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
@@ -1531,7 +1532,7 @@ namespace Codegen{
                 // we need a phi node in this case
                 llvm::IRBuilder<> irb(block);
                 auto nonphi = block->getFirstNonPHI();
-                // if there is no nonphi node, we can just insert at the end of the block, which should be where the irb starts
+                // if there is no non-phi node, we can just insert at the end of the block, which should be where the irb starts
                 if(nonphi!=nullptr){
                     irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                 }
@@ -2070,7 +2071,9 @@ namespace Codegen{
         }
     }
 
-    void genRoot(ASTNode& root){
+    bool generate(AST& ast, llvm::raw_ostream* out){
+        ASTNode& root = ast.root;
+
         // declare implicitly declared functions
         for(auto& [fnName, fnParamCount]: SemanticAnalysis::externalFunctionsToNumParams){
             llvm::SmallVector<llvm::Type*, 8> params;
@@ -2090,6 +2093,10 @@ namespace Codegen{
             auto paramNum = fnNode->children[0]->children.size();
             auto typelist = llvm::SmallVector<llvm::Type*, 8>(paramNum, i64);
             llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, typelist, false);
+            if(findFunction(fnNode->name)){
+                std::cerr << "fatal error: redefinition of function '" << fnNode->name << "'\n";
+                return false;
+            }
             llvm::Function* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnNode->name, moduleUP.get());
             for(unsigned int i = 0; i < paramNum; i++){
                 llvm::Argument* arg = fn->getArg(i);
@@ -2101,10 +2108,6 @@ namespace Codegen{
         for(auto& child:children){
             genFunction(*child);
         }
-    }
-
-    bool generate(AST& ast, llvm::raw_ostream* out){
-        genRoot(ast.root);
 
 
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
@@ -2223,6 +2226,7 @@ namespace Codegen::ISel{
 
         void replaceWithARM(llvm::Instruction* instr) const{
 
+            // TODO with lambda
 #define PUSH_OPS(inst,currentPattern)                                                                  \
     /* iterating over children means, that if they are empty, we ignore them, which is what we want */ \
     for(unsigned i = 0; i < currentPattern->children.size(); i++){                                     \
@@ -2256,7 +2260,7 @@ namespace Codegen::ISel{
                 instr->eraseFromParent();
             }
 
-            if(!noDelete){
+            if(!noDelete && root != replacement){
                 root->replaceAllUsesWith(replacement);
                 root->eraseFromParent();
             }
@@ -3712,6 +3716,9 @@ namespace Codegen::RegAlloc{
         // delete all the phis, they've been handled now (they are already removed from their parent)
         for(auto phi: phisToEraseLater){
             phi->deleteValue();
+            // TODO this deletes things that are still used later, constants apparently (const check in emitReg)
+            // use asan on llvmMain.b to reproduce
+            // TODO side thought: Do i actually materialize constant phi args? I think i do in regalloc, right?
         }
     }
 

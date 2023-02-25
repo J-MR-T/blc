@@ -1202,6 +1202,12 @@ namespace ArgParse{
         bool operator<(const Arg& other) const{
             return shortOpt < other.shortOpt;
         }
+
+        // returns whether the arg has a value/has been set
+        bool operator()() const;
+
+        // returns the args value
+        std::string& operator*() const;
     };
 
     std::map<Arg, std::string> parsedArgs{};
@@ -1238,12 +1244,20 @@ namespace ArgParse{
         const Arg* end() const{
             return all[14];
         }
-    } possible;
+    } args;
+
+    bool Arg::operator()() const{
+        return parsedArgs.contains(*this);
+    }
+
+    std::string& Arg::operator*() const{
+        return parsedArgs[*this];
+    }
 
     void printHelp(const char* argv0){
         std::cerr << "A Compiler for a B like language" << std::endl;
         std::cerr << "Usage: " << std::endl;
-        for(auto& arg:possible){
+        for(auto& arg:args){
             std::cerr << "  ";
             if(arg.shortOpt != ""){
                 std::cerr << "-" << arg.shortOpt;
@@ -1290,7 +1304,7 @@ namespace ArgParse{
         //find them all, put them into a vector, then match them to the possible args
         std::vector<string> positionalArgs{};
         for(int i = 1; i < argc; ++i){
-            for(const auto& arg : possible){
+            for(const auto& arg : args){
                 if(!arg.flag && (("-"+arg.shortOpt) == string{argv[i-1]} || ("--"+arg.longOpt) == string{argv[i-1]})){
                     //the current arg is the value to another argument, so we dont count it
                     goto cont;
@@ -1306,7 +1320,7 @@ cont:
             continue;
         }
 
-        for(const auto& arg : possible){
+        for(const auto& arg : args){
             if(arg.pos != 0){
                 //this is a positional arg
                 if(positionalArgs.size() > arg.pos-1){
@@ -1318,7 +1332,7 @@ cont:
         bool missingRequired = false;
 
         //long/short/flags
-        for(const auto& arg : possible){
+        for(const auto& arg : args){
             if(!arg.flag){
                 std::regex matchShort{" -"+arg.shortOpt+"\\s*([^\\s]+)"};
                 std::regex matchLong{" --"+arg.longOpt+"(\\s*|=)([^\\s=]+)"};
@@ -1384,7 +1398,7 @@ namespace Codegen{
     llvm::Function* currentFunction = nullptr;
 
     void warn(const std::string& msg, llvm::Instruction* instr = nullptr){
-        if(!ArgParse::parsedArgs.contains(ArgParse::possible.nowarn)){
+        if(!ArgParse::args.nowarn()){
             llvm::errs() << "Warning: " << msg;
             if(instr != nullptr){
                 llvm::errs() << " at " << *instr;
@@ -4247,15 +4261,15 @@ int main(int argc, char *argv[]) {
     Codegen::initInstructionFunctions();
     auto parsedArgs = ArgParse::parse(argc, argv);
 
-    if(parsedArgs.contains(ArgParse::possible.help)){
+    if(ArgParse::args.help()){
         ArgParse::printHelp(argv[0]);
         return ExitCode::SUCCESS;
     }
 
-    std::string inputFilename = parsedArgs.at(ArgParse::possible.input);
+    std::string inputFilename = *ArgParse::args.input;
     int iterations = 1;
-    if(parsedArgs.contains(ArgParse::possible.iterations)){
-        iterations = std::stoi(parsedArgs.at(ArgParse::possible.iterations));
+    if(ArgParse::args.iterations()){
+        iterations = std::stoi(*ArgParse::args.iterations);
     }
 
     if(access(inputFilename.c_str(),R_OK) != 0){
@@ -4266,9 +4280,9 @@ int main(int argc, char *argv[]) {
     std::string preprocessedFilePath;
 
     auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
-    if(parsedArgs.contains(ArgParse::possible.preprocess)){
+    if(ArgParse::args.preprocess()){
         preprocessedFilePath="/tmp/" + std::to_string(epochsecs) + ".bpreprocessed";
-        execute("cpp", "-E", "-P", parsedArgs.at(ArgParse::possible.input), "-o", preprocessedFilePath);
+        execute("cpp", "-E", "-P", *ArgParse::args.input, "-o", preprocessedFilePath);
 
         inputFile = std::ifstream{preprocessedFilePath};
     }
@@ -4283,10 +4297,10 @@ int main(int argc, char *argv[]) {
     }
     MEASURE_TIME_END(parse);
 
-    if(parsedArgs.contains(ArgParse::possible.preprocess)) system(("rm " + preprocessedFilePath).c_str());
+    if(ArgParse::args.preprocess()) system(("rm " + preprocessedFilePath).c_str());
 
     MEASURE_TIME_START(semanalyze);
-    if(!parsedArgs.contains(ArgParse::possible.nosemantic)){
+    if(!ArgParse::args.nosemantic()){
         for(int i = 0; i<iterations; i++){
             SemanticAnalysis::reset();
             SemanticAnalysis::analyze(*ast);
@@ -4305,16 +4319,16 @@ int main(int argc, char *argv[]) {
     double regallocSeconds{0.0};
     double asmSeconds{0.0};
 
-    if(parsedArgs.contains(ArgParse::possible.print) || parsedArgs.contains(ArgParse::possible.dot) || parsedArgs.contains(ArgParse::possible.url)){
-        if(parsedArgs.contains(ArgParse::possible.url)){
+    if(ArgParse::args.print() || parsedArgs.contains(ArgParse::args.dot) || parsedArgs.contains(ArgParse::args.url)){
+        if(ArgParse::args.url()){
             std::stringstream ss;
             ast->printDOT(ss);
             auto compactSpacesRegex = std::regex("\\s+");
             auto str = std::regex_replace(ss.str(), compactSpacesRegex, " ");
             std::cout << "https://dreampuf.github.io/GraphvizOnline/#" << url_encode(str) << std::endl;
-        }else if(parsedArgs.contains(ArgParse::possible.dot)){
-            if(parsedArgs.contains(ArgParse::possible.output)){
-                std::ofstream outputFile{parsedArgs.at(ArgParse::possible.output)};
+        }else if(ArgParse::args.dot()){
+            if(ArgParse::args.output()){
+                std::ofstream outputFile{*ArgParse::args.output};
                 ast->printDOT(outputFile);
                 outputFile.close();
             }else{
@@ -4325,19 +4339,19 @@ int main(int argc, char *argv[]) {
         }
     }else {
         std::error_code errorCode;
-        std::string outfile = parsedArgs.contains(ArgParse::possible.output) ? parsedArgs.at(ArgParse::possible.output) : "";
+        std::string outfile = ArgParse::args.output() ? *ArgParse::args.output : "";
         llvm::raw_fd_ostream llvmOut = llvm::raw_fd_ostream(outfile == ""? "-" : outfile, errorCode);
         llvm::raw_fd_ostream devNull = llvm::raw_fd_ostream("/dev/null", errorCode);
 
         MEASURE_TIME_START(codegen);
-        if(!(genSuccess = Codegen::generate(*ast, parsedArgs.contains(ArgParse::possible.llvm) ? &llvmOut : nullptr))){
+        if(!(genSuccess = Codegen::generate(*ast, ArgParse::args.llvm() ? &llvmOut : nullptr))){
             llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
             goto continu;
         }
         MEASURE_TIME_END(codegen);
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
-        if(parsedArgs.contains(ArgParse::possible.output)){
+        if(ArgParse::args.output()){
             // adapted from https://www.llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl08.html
             llvm::InitializeAllTargetInfos();
             llvm::InitializeAllTargets();
@@ -4361,7 +4375,7 @@ int main(int argc, char *argv[]) {
 
             auto CPU = "generic";
             auto features = "";
-            auto tempObjFileName = parsedArgs.at(ArgParse::possible.output) + ".o-XXXXXX";
+            auto tempObjFileName = *ArgParse::args.output + ".o-XXXXXX";
             auto tempObjFileFD = mkstemp(tempObjFileName.data());
 
             llvm::TargetOptions opt;
@@ -4399,7 +4413,7 @@ int main(int argc, char *argv[]) {
             // link
             if(auto ret = execute(
                     "ld",
-                    "-o", parsedArgs.at(ArgParse::possible.output).c_str(),
+                    "-o", (*ArgParse::args.output).c_str(),
                     tempObjFileName.c_str(),
                     "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o");
                 ret != ExitCode::SUCCESS)
@@ -4407,22 +4421,22 @@ int main(int argc, char *argv[]) {
 
             std::filesystem::remove(tempObjFileName);
 
-        }else if(!parsedArgs.contains(ArgParse::possible.llvm)){
+        }else if(!ArgParse::args.llvm()){
             // isel
             MEASURE_TIME_START(isel);
-            Codegen::ISel::doISel(parsedArgs.contains(ArgParse::possible.isel) ? &llvmOut : nullptr);
+            Codegen::ISel::doISel(ArgParse::args.isel() ? &llvmOut : nullptr);
             MEASURE_TIME_END(isel);
             iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
 
             // regalloc
             MEASURE_TIME_START(regalloc);
-            Codegen::RegAlloc::doRegAlloc(parsedArgs.contains(ArgParse::possible.regalloc) ? &llvmOut : nullptr);
+            Codegen::RegAlloc::doRegAlloc(ArgParse::args.regalloc() ? &llvmOut : nullptr);
             MEASURE_TIME_END(regalloc);
             regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
 
             // asm
             MEASURE_TIME_START(asm);
-            (Codegen::AssemblyGen(parsedArgs.contains(ArgParse::possible.asmout) ? &llvmOut : &devNull)).doAsmOutput();
+            (Codegen::AssemblyGen(ArgParse::args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
             MEASURE_TIME_END(asm);
             asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
         }
@@ -4430,7 +4444,7 @@ int main(int argc, char *argv[]) {
 continu:
 
     //print execution times
-    if(parsedArgs.contains(ArgParse::possible.benchmark)){
+    if(ArgParse::args.benchmark()){
         std::cout
         << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s\n"
         << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s\n"

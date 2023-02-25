@@ -396,54 +396,22 @@ class UnexpectedTokenException :  public ParsingException {
             Type type = Token::Type::EMPTY;
             //parentheses, brackets, braces, unabiguous operators, ...
             switch(prog[progI]){
-                case '(':
-                    type = Type::L_PAREN;
-                    break;
-                case ')':
-                    type = Type::R_PAREN;
-                    break;
-                case '[':
-                    type = Type::L_BRACKET;
-                    break;
-                case ']':
-                    type = Type::R_BRACKET;
-                    break;
-                case '{':
-                    type = Type::L_BRACE;
-                    break;
-                case '}':
-                    type = Type::R_BRACE;
-                    break;
-                case '~':
-                    type = Type::TILDE;
-                    break;
-                case '^':
-                    type = Type::BITWISE_XOR;
-                    break;
-                case '@':
-                    type = Type::AT;
-                    break;
-                case '+':
-                    type = Type::PLUS;
-                    break;
-                case '-':
-                    type = Type::MINUS;
-                    break;
-                case '*':
-                    type = Type::TIMES;
-                    break;
-                case '/':
-                    type = Type::DIV;
-                    break;
-                case '%':
-                    type = Type::MOD;
-                    break;
-                case ';':
-                    type = Type::SEMICOLON;
-                    break;
-                case ',':
-                    type = Type::COMMA;
-                    break;
+                case '(': type = Type::L_PAREN;     break;
+                case ')': type = Type::R_PAREN;     break;
+                case '[': type = Type::L_BRACKET;   break;
+                case ']': type = Type::R_BRACKET;   break;
+                case '{': type = Type::L_BRACE;     break;
+                case '}': type = Type::R_BRACE;     break;
+                case '~': type = Type::TILDE;       break;
+                case '^': type = Type::BITWISE_XOR; break;
+                case '@': type = Type::AT;          break;
+                case '+': type = Type::PLUS;        break;
+                case '-': type = Type::MINUS;       break;
+                case '*': type = Type::TIMES;       break;
+                case '/': type = Type::DIV;         break;
+                case '%': type = Type::MOD;         break;
+                case ';': type = Type::SEMICOLON;   break;
+                case ',': type = Type::COMMA;       break;
             }
 
             if(type!=Type::EMPTY){

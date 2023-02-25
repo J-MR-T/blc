@@ -11,7 +11,7 @@ LLVM_CFLAGS=$(shell $(LLVM_CONFIG) --cppflags --ldflags --libs --system-libs --l
 
 ALL_FLAGS=$(CFLAGS) $(LLVM_CFLAGS)
 
-SOURCES=$(wildcard src/*.cpp)
+SOURCES=$(wildcard *.cpp)
 
 .PHONY: all debug clean
 all: $(SOURCES)

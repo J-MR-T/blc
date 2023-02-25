@@ -4209,7 +4209,8 @@ namespace Codegen{
                         // allocas are ignored, they are handled in the prologue
                         // unreachables are ignored, because what else should we do?
                     }else{
-                        EXIT_TODO;
+                        llvm::errs() << "Unhandled instruction in asm writing: " << inst << "\n";
+                        exit(ExitCode::ERROR_CODEGEN);
                     }
                 }
             }
@@ -4406,7 +4407,7 @@ int main(int argc, char *argv[]) {
                 llvm::raw_fd_ostream dest(tempObjFileFD, true);
 
                 if(ec){
-                    llvm::errs() << "Could not open file: " << ec.message();
+                    llvm::errs() << "Could not open file: " << ec.message() << "\n";
                     goto continu;
                 }
 
@@ -4415,7 +4416,7 @@ int main(int argc, char *argv[]) {
                 auto fileType = llvm::CGFT_ObjectFile;
 
                 if(targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)){
-                    llvm::errs() << "TargetMachine can't emit a file of this type";
+                    llvm::errs() << "TargetMachine can't emit a file of this type" << "\n";
                     goto continu;
                 }
 
@@ -4425,7 +4426,8 @@ int main(int argc, char *argv[]) {
             }
 
             // link
-            if(auto ret = execute("ld", 
+            if(auto ret = execute(
+                    "ld",
                     "-o", parsedArgs.at(ArgParse::possible.output).c_str(),
                     tempObjFileName.c_str(),
                     "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o");
@@ -4458,13 +4460,14 @@ continu:
 
     //print execution times
     if(parsedArgs.contains(ArgParse::possible.benchmark)){
-        std::cout << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s"  << std::endl;
-        std::cout << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s"  << std::endl;
-        std::cout << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s"  << std::endl;
-        std::cout << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s"  << std::endl;
-        std::cout << "Average register allocation time: (over "   << 1          << " iterations): " << regallocSeconds                                  << "s"  << std::endl;
-        std::cout << "Average assembly generation time: (over "   << 1          << " iterations): " << asmSeconds                                       << "s"  << std::endl;
-        std::cout << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB" << std::endl;
+        std::cout
+        << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s\n"
+        << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s\n"
+        << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s\n"
+        << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s\n"
+        << "Average register allocation time: (over "   << 1          << " iterations): " << regallocSeconds                                  << "s\n"
+        << "Average assembly generation time: (over "   << 1          << " iterations): " << asmSeconds                                       << "s\n"
+        << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB\n";
     }
 
     if(!genSuccess) return ExitCode::ERROR_CODEGEN;

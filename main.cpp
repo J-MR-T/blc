@@ -4366,9 +4366,12 @@ int main(int argc, char *argv[]) {
 
             llvm::TargetOptions opt;
             auto RM = llvm::Optional<llvm::Reloc::Model>();
-            auto targetMachine = target->createTargetMachine(targetTriple, CPU, features, opt, RM);
 
-            Codegen::moduleUP->setDataLayout(targetMachine->createDataLayout());
+            // For some reason, the targetMachine needs to be deleted manually, so encapsulate it in a unique_ptr
+            auto targetMachineUP = std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTriple, CPU, features, opt, RM));
+
+            auto DL = targetMachineUP->createDataLayout();
+            Codegen::moduleUP->setDataLayout(DL);
 
             {
                 std::error_code ec;
@@ -4383,7 +4386,7 @@ int main(int argc, char *argv[]) {
                 llvm::legacy::PassManager pass;
                 auto fileType = llvm::CGFT_ObjectFile;
 
-                if(targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)){
+                if(targetMachineUP->addPassesToEmitFile(pass, dest, nullptr, fileType)){
                     llvm::errs() << "TargetMachine can't emit a file of this type" << "\n";
                     goto continu;
                 }

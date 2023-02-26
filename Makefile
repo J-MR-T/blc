@@ -20,5 +20,8 @@ all: $(SOURCES)
 debug: $(SOURCES)
 	$(CXXC) $^ $(ALL_FLAGS) -fsanitize=address -fsanitize=undefined -fsanitize=leak -O0 -g -o $(OUT)
 
+test: debug
+	lit -sv .
+
 clean:
 	rm $(OUT)

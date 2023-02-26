@@ -1,6 +1,8 @@
 // RUN: %bc -l %s %t && %t | FileCheck %s
+// RUN: %bc -r %s
 
-// TODO asan reports heap use after free
+// CHECK-NOT: RegAlloc broke module
+// CHECK-NOT: phi still has uses, but is about to be deleted
 
 fib(n){
     if(n <= 2) return 1;

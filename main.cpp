@@ -2997,7 +2997,6 @@ namespace Codegen::ISel{
                     predStr = llvmPredicateToARM(pred);
                     llvmSetStringMetadata(brFalse, "pred", predStr);
                     llvmSetStringMetadata(brFalse, "label", falseBlock->getName());
-                    DEBUGLOG("on false branch: " << *brFalse);
                 }
 
                 // reinsert a branch to keep llvm happy and the block well formed, this is ignored later
@@ -3455,6 +3454,7 @@ namespace Codegen::RegAlloc{
                 // (pseudo-)store to stack, needs to be looked at by regalloc again later on, possibly to insert load for incoming value, if its not in a register
                 irb.CreateCall(
                     instructionFunctions[ARM_PSEUDO_str],
+                    // TODO have to copy the value here, as it is deleted later, and if its a constant (-> owned by the phi), it will be deleted later when we delete the phis -> not stonks
                     {phi->getIncomingValue(edgeNum), allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}
                 );
                 toHandle.erase(phi);
@@ -3584,12 +3584,7 @@ namespace Codegen::RegAlloc{
 
                         call->replaceUsesOfWith(val, newVal);
                         call->setCalledFunction(instructionFunctions[ARM_str]);
-                    }else if(call->hasMetadata("reg")
-                            || call->getCalledFunction()==instructionFunctions[ARM_b]
-                            || call->getCalledFunction()==instructionFunctions[ARM_b_cond]
-                            || call->getCalledFunction()==instructionFunctions[ARM_b_cbnz]
-                            || call->getCalledFunction()==instructionFunctions[ARM_b_cbz]
-                    ){
+                    }else if(call->hasMetadata("reg")){
                         continue;
                     }else if(call->getCalledFunction() == instructionFunctions[ZExt_handled_in_Reg_Alloc]){
                         inst.replaceAllUsesWith(inst.getOperand(0));
@@ -3646,10 +3641,8 @@ namespace Codegen::RegAlloc{
 
         // delete all the phis, they've been handled now (they are already removed from their parent)
         for(auto phi: phisToEraseLater){
+            assert(phi->use_empty() && "phi still has uses, but is about to be deleted");
             phi->deleteValue();
-            // TODO this deletes things that are still used later, constants apparently (const check in emitReg)
-            // use asan on llvmMain.b to reproduce
-            // TODO side thought: Do i actually materialize constant phi args? I think i do in regalloc, right?
         }
     }
 

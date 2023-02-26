@@ -1605,8 +1605,7 @@ namespace Codegen{
                     // short circuiting logical ops: conditional evaluation
 
                     // can get preds using: llvm::pred_begin()/ llvm::predecessors()
-                    bool isAnd;
-                    if((isAnd = (exprNode.op == Token::Type::LOGICAL_AND)) || exprNode.op == Token::Type::LOGICAL_OR){
+                    if(bool isAnd = exprNode.op == Token::Type::LOGICAL_AND; isAnd || exprNode.op == Token::Type::LOGICAL_OR){
                         // we need to generate conditional branches in these cases, clang does it the same way
                         // but the lhs is always evaluated anyway, so we can just do that first
                         auto lhs = genExpr(lhsNode, irb);
@@ -3064,12 +3063,18 @@ namespace Codegen::ISel{
                 if(instr->isConditional()){
                     auto cond = instr->getCondition();
 
-                    assert(llvm::isa<llvm::ConstantInt>(cond));
+                    assert(llvm::isa<llvm::ConstantInt>(cond) && "conditional branch condition is not a constant int, this means we didn't catch a conditional branch before");
 
                     auto trueBlock = instr->getSuccessor(0);
                     auto falseBlock = instr->getSuccessor(1);
 
                     auto branchTo = llvm::dyn_cast<llvm::ConstantInt>(cond)->isZero() ? falseBlock : trueBlock;
+                    auto branchNotTo = llvm::dyn_cast<llvm::ConstantInt>(cond)->isZero() ? trueBlock : falseBlock;
+
+                    // remove the incoming edge from the phis of the block which is never branched to
+                    for(auto& phi: branchNotTo->phis()){
+                        phi.removeIncomingValue(irb.GetInsertBlock());
+                    }
 
                     // make use of fallthrough
                     if(irb.GetInsertBlock()->getNextNode() == branchTo){

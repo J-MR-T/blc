@@ -74,6 +74,7 @@
 
 using std::string;
 using std::unique_ptr;
+using std::literals::string_literals::operator""s;
 
 #ifndef NDEBUG
 #define DEBUGLOG(x) llvm::errs() << x << "\n"; fflush(stderr);
@@ -163,87 +164,47 @@ public:
     // turns the tokens back into their original strings for pretty printing
     static string toString(Token::Type type){
         switch(type){
-            case Type::EMPTY:
-                return "EMPTY";
-            case Type::NUM:
-                return "NUM";
-            case Type::IDENTIFIER:
-                return "IDENTIFIER";
-            case Type::KW_AUTO:
-                return "auto";
-            case Type::KW_REGISTER:
-                return "register";
-            case Type::KW_IF:
-                return "if";
-            case Type::KW_ELSE:
-                return "else";
-            case Type::KW_WHILE:
-                return "while";
-            case Type::KW_RETURN:
-                return "return";
-            case Type::SEMICOLON:
-                return ";";
-            case Type::COMMA:
-                return ",";
-            case Type::L_PAREN:
-                return "(";
-            case Type::R_PAREN:
-                return ")";
-            case Type::L_BRACKET:
-                return "[";
-            case Type::R_BRACKET:
-                return "]";
-            case Type::L_BRACE:
-                return "{";
-            case Type::R_BRACE:
-                return "}";
-            case Type::LOGICAL_NOT:
-                return "!";
-            case Type::TILDE:
-                return "~";
-            case Type::AMPERSAND:
-                return "&";
-            case Type::BITWISE_OR:
-                return "|";
-            case Type::BITWISE_XOR:
-                return "^";
-            case Type::AT:
-                return "@";
-            case Type::PLUS:
-                return "+";
-            case Type::MINUS:
-                return "-";
-            case Type::TIMES:
-                return "*";
-            case Type::DIV:
-                return "/";
-            case Type::MOD:
-                return "%";
-            case Type::SHIFTL:
-                return "<<";
-            case Type::SHIFTR:
-                return ">>";
-            case Type::LESS:
-                return "<";
-            case Type::GREATER:
-                return ">";
-            case Type::LESS_EQUAL:
-                return "<=";
-            case Type::GREATER_EQUAL:
-                return ">=";
-            case Type::EQUAL:
-                return "==";
-            case Type::NOT_EQUAL:
-                return "!=";
-            case Type::ASSIGN:
-                return "=";
-            case Type::LOGICAL_AND:
-                return "&&";
-            case Type::LOGICAL_OR:
-                return "||";
-            case Type::EOP:
-                return "EOP";
-            }
+            case Type::EMPTY:         return "EMPTY";
+            case Type::NUM:           return "NUM";
+            case Type::IDENTIFIER:    return "IDENTIFIER";
+            case Type::KW_AUTO:       return "auto";
+            case Type::KW_REGISTER:   return "register";
+            case Type::KW_IF:         return "if";
+            case Type::KW_ELSE:       return "else";
+            case Type::KW_WHILE:      return "while";
+            case Type::KW_RETURN :    return " return ";
+            case Type::SEMICOLON:     return ";";
+            case Type::COMMA:         return ",";
+            case Type::L_PAREN:       return "(";
+            case Type::R_PAREN:       return ")";
+            case Type::L_BRACKET:     return "[";
+            case Type::R_BRACKET:     return "]";
+            case Type::L_BRACE:       return "{";
+            case Type::R_BRACE:       return "}";
+            case Type::LOGICAL_NOT:   return "!";
+            case Type::TILDE:         return "~";
+            case Type::AMPERSAND:     return "&";
+            case Type::BITWISE_OR:    return "|";
+            case Type::BITWISE_XOR:   return "^";
+            case Type::AT:            return "@";
+            case Type::PLUS:          return "+";
+            case Type::MINUS:         return "-";
+            case Type::TIMES:         return "*";
+            case Type::DIV:           return "/";
+            case Type::MOD:           return "%";
+            case Type::SHIFTL:        return "<<";
+            case Type::SHIFTR:        return ">>";
+            case Type::LESS:          return "<";
+            case Type::GREATER:       return ">";
+            case Type::LESS_EQUAL:    return "<=";
+            case Type::GREATER_EQUAL: return ">=";
+            case Type::EQUAL:         return "==";
+            case Type::NOT_EQUAL:     return "!=";
+            case Type::ASSIGN:        return "=";
+            case Type::LOGICAL_AND:   return "&&";
+            case Type::LOGICAL_OR:    return "||";
+            case Type::EOP:           return "EOP";
+        }
         return "UNKNOWN";
     }
 
@@ -459,24 +420,12 @@ class UnexpectedTokenException :  public ParsingException {
 
             //ambiguous one character operators, ambiguity has been cleared by previous ifs
             switch(prog[progI+0]){
-                case '<':
-                    type = Type::LESS;
-                    break;
-                case '>':
-                    type = Type::GREATER;
-                    break;
-                case '=':
-                    type = Type::ASSIGN;
-                    break;
-                case '&':
-                    type = Type::AMPERSAND;
-                    break;
-                case '|':
-                    type = Type::BITWISE_OR;
-                    break;
-                case '!':
-                    type = Type::LOGICAL_NOT;
-                    break;
+                case '<': type = Type::LESS;        break;
+                case '>': type = Type::GREATER;     break;
+                case '=': type = Type::ASSIGN;      break;
+                case '&': type = Type::AMPERSAND;   break;
+                case '|': type = Type::BITWISE_OR;  break;
+                case '!': type = Type::LOGICAL_NOT; break;
             }
 
             if(type!=Type::EMPTY){
@@ -485,9 +434,7 @@ class UnexpectedTokenException :  public ParsingException {
             }
 
             //invalid character
-            string errormsg = "Invalid character: ";
-            errormsg += prog[progI+0];
-            throw std::runtime_error(errormsg);
+            throw std::runtime_error("Invalid character: "s + prog[progI+0]);
 
         }else{
             return peeked;
@@ -735,33 +682,29 @@ public:
 
 };
 
-// you can take a C programmer out of C
-// but you can't take the C out of a C programmer
-#define TUP(x,y) std::make_tuple((x),(y))
-
 // int: precedence, bool: rassoc
 static const std::unordered_map<Token::Type, std::tuple<int,bool>> operators = {
-    {Token::Type::L_BRACKET,           TUP(14, false)},
+    {Token::Type::L_BRACKET,           {14, false}},
     // unary: 13 (handled seperately)
-    {Token::Type::TIMES,            TUP(12, false)},
-    {Token::Type::DIV,                 TUP(12, false)},
-    {Token::Type::MOD,                 TUP(12, false)},
-    {Token::Type::PLUS,                TUP(11, false)},
-    {Token::Type::MINUS,               TUP(11, false)},
-    {Token::Type::SHIFTL,              TUP(10, false)},
-    {Token::Type::SHIFTR,              TUP(10, false)},
-    {Token::Type::LESS,                TUP(9,  false)},
-    {Token::Type::GREATER,             TUP(9,  false)},
-    {Token::Type::LESS_EQUAL,          TUP(9,  false)},
-    {Token::Type::GREATER_EQUAL,       TUP(9,  false)},
-    {Token::Type::EQUAL,               TUP(8,  false)},
-    {Token::Type::NOT_EQUAL,           TUP(8,  false)},
-    {Token::Type::AMPERSAND,           TUP(7,  false)}, //bitwise and in this case
-    {Token::Type::BITWISE_XOR,         TUP(6,  false)},
-    {Token::Type::BITWISE_OR,          TUP(5,  false)},
-    {Token::Type::LOGICAL_AND,         TUP(4,  false)},
-    {Token::Type::LOGICAL_OR,          TUP(3,  false)},
-    {Token::Type::ASSIGN,              TUP(1,  true)},
+    {Token::Type::TIMES,               {12, false}},
+    {Token::Type::DIV,                 {12, false}},
+    {Token::Type::MOD,                 {12, false}},
+    {Token::Type::PLUS,                {11, false}},
+    {Token::Type::MINUS,               {11, false}},
+    {Token::Type::SHIFTL,              {10, false}},
+    {Token::Type::SHIFTR,              {10, false}},
+    {Token::Type::LESS,                {9,  false}},
+    {Token::Type::GREATER,             {9,  false}},
+    {Token::Type::LESS_EQUAL,          {9,  false}},
+    {Token::Type::GREATER_EQUAL,       {9,  false}},
+    {Token::Type::EQUAL,               {8,  false}},
+    {Token::Type::NOT_EQUAL,           {8,  false}},
+    {Token::Type::AMPERSAND,           {7,  false}}, //bitwise AND in this case
+    {Token::Type::BITWISE_XOR,         {6,  false}},
+    {Token::Type::BITWISE_OR,          {5,  false}},
+    {Token::Type::LOGICAL_AND,         {4,  false}},
+    {Token::Type::LOGICAL_OR,          {3,  false}},
+    {Token::Type::ASSIGN,              {1,  true}},
 };
 
 using UnexpectedTokenException = Tokenizer::UnexpectedTokenException;
@@ -2551,6 +2494,7 @@ namespace Codegen{
 
 } // namespace Codegen
 
+// TODO for some reason the branch reinsertion seems to turn some conditional branches into unconditional ones (on constexpr conditions). This would fine, except that it breaks the phi nodes.
 namespace Codegen::ISel{
     // TODO is there any way to make this nicer? The patterns themselves have so much 'similar' code, but its hard to factor out into something common
 
@@ -3503,7 +3447,7 @@ namespace Codegen::RegAlloc{
             // start at phis with 0 readers
 
             auto handleChainElement = [&](llvm::PHINode* phi){
-                /* (pseudo-)store to stack, needs to be looked at by regalloc again later on, possibly to insert load for incoming value, if its not in a register */
+                // (pseudo-)store to stack, needs to be looked at by regalloc again later on, possibly to insert load for incoming value, if its not in a register
                 irb.CreateCall(
                     instructionFunctions[ARM_PSEUDO_str],
                     {phi->getIncomingValue(edgeNum), allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}
@@ -4297,7 +4241,8 @@ int main(int argc, char *argv[]) {
     }
     MEASURE_TIME_END(parse);
 
-    if(ArgParse::args.preprocess()) system(("rm " + preprocessedFilePath).c_str());
+    if(ArgParse::args.preprocess())
+        std::filesystem::remove(preprocessedFilePath);
 
     MEASURE_TIME_START(semanalyze);
     if(!ArgParse::args.nosemantic()){

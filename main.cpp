@@ -88,13 +88,13 @@ using std::literals::string_literals::operator""s;
 // kind of an enum class but implicitly convertible to int
 namespace ExitCode{
 enum {
-    SUCCESS = 0,
-    ERROR = 1,
-    TODO = 2, // exit status 2 for 2do :)
-    ERROR_IO = ERROR | 1 << 2,
-    ERROR_SYNTAX = ERROR | 1 << 3,
+    SUCCESS       = 0,
+    ERROR         = 1,
+    TODO          = 2, // exit status 2 for 2do :)
+    ERROR_IO      = ERROR | 1 << 2,
+    ERROR_SYNTAX  = ERROR | 1 << 3,
     ERROR_CODEGEN = ERROR | 1 << 4,
-    ERROR_LINK = ERROR | 1 << 5,
+    ERROR_LINK    = ERROR | 1 << 5,
 };
 }
 

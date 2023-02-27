@@ -3072,7 +3072,6 @@ namespace Codegen::ISel{
                 }
 
                 // cannot be conditional branch, because that always has an icmp NE as its condition, thats matched before
-                DEBUGLOG("br: " << *instr);
                 assert(instr->isUnconditional() && "unconditional branch expected");
 
                 auto bb = instr->getSuccessor(0);
@@ -3369,8 +3368,6 @@ namespace Codegen::RegAlloc{
             return;
         }
 
-        DEBUGLOG("phis for block " << phiNodes.begin()->getParent()->getName());
-
         // allocate a stack slot for each phi
         unsigned phiCounter{0};
         unsigned originalSize = allocator.spillMap.size();
@@ -3385,7 +3382,6 @@ namespace Codegen::RegAlloc{
         // per edge:
         unsigned edges = phiNodes.begin()->getNumIncomingValues();
         for(unsigned int edgeNum = 0; edgeNum<edges; edgeNum++){
-            DEBUGLOG("handling edge to " << phiNodes.begin()->getIncomingBlock(edgeNum)->getName());
             llvm::ValueMap<llvm::PHINode*, int> numReaders;
             llvm::ValueMap<llvm::PHINode*, llvm::SmallPtrSet<llvm::PHINode*, 8>> readBy;
 
@@ -3539,7 +3535,6 @@ namespace Codegen::RegAlloc{
         // I think it does, *except for the arguments of phi nodes*! -> either handle phis before everything else and insert a pseudo reference, to a value that is not yet defined (but will be defined in the same block by the register allocator later)
         for(auto& bbNode: llvm::depth_first(&DT)){
             auto bb = bbNode->getBlock();
-            DEBUGLOG("regalloc for bb " << bb->getName().str());
             for(auto& inst: llvm::make_early_inc_range(*bb)){
                 if(auto call = llvm::dyn_cast_if_present<llvm::CallInst>(&inst)){
                     // pseudo stores for phis
@@ -3626,6 +3621,12 @@ namespace Codegen::RegAlloc{
 
         // delete all the phis, they've been handled now (they are already removed from their parent)
         for(auto phi: phisToEraseLater){
+
+#ifndef NDEBUG
+            for(auto& use: phi->uses()){
+                DEBUGLOG("phi " << phi->getName().str() << " has use in " << *use.getUser());
+            }
+#endif
             assert(phi->use_empty() && "phi still has uses, but is about to be deleted");
             phi->deleteValue();
         }

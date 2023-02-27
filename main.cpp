@@ -3027,9 +3027,9 @@ namespace Codegen::ISel{
                 auto cond       = llvm::dyn_cast<llvm::ICmpInst>(OP_N(instr,0));
                 auto condInner  = OP_N_MAT(cond,0);
 
-                // TODO maybe here the condition is also reversed?
-                auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
-                auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
+                // true and false block are reversed, because we have the negated (ne) condition
+                auto falseBlock = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,1));
+                auto trueBlock  = llvm::dyn_cast<llvm::BasicBlock>(OP_N(instr,2));
 
 
                 // fallthrough
@@ -3361,11 +3361,7 @@ namespace Codegen::RegAlloc{
 
             nextReg = X0;
             for(auto& arg: call->args()){
-                if(!llvm::isa<llvm::CallInst>(arg) || !llvm::dyn_cast<llvm::CallInst>(arg)->hasMetadata("reg"))
-                    continue;
-
-                // TODO is this distinction correct? This doesn't handle parameters for instance, right?
-                get(arg);
+                tryGetAndRewriteInstruction(call, arg);
             }
             nextReg = X0;
             allocate(call);
@@ -3639,6 +3635,7 @@ namespace Codegen::RegAlloc{
                     }
                 } else if(auto alloca = llvm::dyn_cast_if_present<llvm::AllocaInst>(&inst)){
                     // annotate it with noSpill (meaning if it is used as an arugment somewhere, it does not get spilled)
+                    // TODO with the new allocation scheme, this doesn't make sense anymore, right?
                     alloca->setMetadata("noSpill", llvm::MDNode::get(ctx, {}));
                 } else if(auto returnInst = llvm::dyn_cast_if_present<llvm::ReturnInst>(&inst)){
                     if(auto arg = returnInst->getReturnValue()){

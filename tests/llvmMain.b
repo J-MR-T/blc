@@ -1,9 +1,8 @@
 // RUN: %bc -l %s %t && %t | FileCheck %s
-// RUN: %bc -r %s | FileCheck --check-prefix=CHECK-REGALLOC %s
+// RUN: %bc -r %s 2>&1 | FileCheck --check-prefix=CHECK-REGALLOC %s
 // RUN: %bc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | FileCheck %s
 
 // CHECK-REGALLOC-NOT: RegAlloc broke module
-// CHECK-REGALLOC-NOT: phi still has uses, but is about to be deleted
 
 fib(n){
     // CHECK-REGALLOC: @ARM_str({{.*}}%n

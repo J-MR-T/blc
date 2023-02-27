@@ -2103,8 +2103,6 @@ namespace Codegen{
 
 namespace Codegen::ISel{
 
-    unsigned currentFunctionBytesToFreeAtEnd{0};
-
     // test, for the pattern matching
     struct Pattern{
     public:
@@ -3184,21 +3182,12 @@ namespace Codegen::ISel{
         for(auto& fn : moduleUP->functions()){
             if(fn.isDeclaration()) continue;
 
-            currentFunctionBytesToFreeAtEnd = 0;
+            // Because this inserts new blocks and branches, we need to split the critical edges here.
+            // so this has to be done before fallthrough and ARM branches are inserted
+            llvm::SplitAllCriticalEdges(fn);
+
+
             matchPatterns(&fn, patterns);
-            // irb starts at terminator of last block
-
-            if(currentFunctionBytesToFreeAtEnd==0) continue;
-
-            // inserting add sp, sp, #bytesToFreeAtEnd before all returns
-            llvm::IRBuilder<> irb{ctx};
-            for(auto& block : fn){
-                auto term = block.getTerminator();
-                if(llvm::isa_and_present<llvm::ReturnInst>(term)){
-                    irb.SetInsertPoint(term);
-                    irb.CreateCall(instructionFunctions[ARM_add_SP], {irb.getInt64(currentFunctionBytesToFreeAtEnd)}); // takes immediate
-                }
-            }
         }
 
         if(out){
@@ -3527,7 +3516,6 @@ namespace Codegen::RegAlloc{
     }
 
     void regallocFn(llvm::Function& f){
-        llvm::SplitAllCriticalEdges(f);
 
         llvm::IRBuilder<> irb(f.getEntryBlock().getFirstNonPHI());
         auto spillsAllocation = irb.CreateAlloca(irb.getInt64Ty(), irb.getInt64(0), "spills");

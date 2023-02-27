@@ -275,10 +275,7 @@ class UnexpectedTokenException :  public ParsingException {
         std::stringstream ss2;
         ss2 << std::endl;
         newline = ss2.str();
-
     }
-
-    
 
     static const std::unordered_map<string, Token::Type> keywords; // initialized below
     const std::regex numberRegex{"[0-9]+"};
@@ -380,43 +377,30 @@ class UnexpectedTokenException :  public ParsingException {
                 return peeked = type;
             }
 
+#define ifBinOp(setTypeTo, c1, c2) if(prog[progI] == (c1) && prog[progI+1] == (c2)){ type = (setTypeTo); }
+
             //two characters
             if(prog.size()-progI >= 2){
                 //shift operators
-                if(prog[progI+0] == '<' && prog[progI+1] == '<'){
-                    type = Type::SHIFTL;
-                }
-                if(prog[progI+0] == '>' && prog[progI+1] == '>'){
-                    type = Type::SHIFTR;
-                }
+                     ifBinOp(Type::SHIFTL, '<', '<')
+                else ifBinOp(Type::SHIFTR, '>', '>');
 
                 //comparison operators
-                if(prog[progI+0] == '<' && prog[progI+1] == '='){
-                    type = Type::LESS_EQUAL;
-                }
-                if(prog[progI+0] == '>' && prog[progI+1] == '='){
-                    type = Type::GREATER_EQUAL;
-                }
-                if(prog[progI+0] == '=' && prog[progI+1] == '='){
-                    type = Type::EQUAL;
-                }
-                if(prog[progI+0] == '!' && prog[progI+1] == '='){
-                    type = Type::NOT_EQUAL;
-                }
+                     ifBinOp(Type::LESS_EQUAL,     '<',  '=')
+                else ifBinOp(Type::GREATER_EQUAL,  '>',  '=')
+                else ifBinOp(Type::EQUAL,          '=',  '=')
+                else ifBinOp(Type::NOT_EQUAL,      '!',  '=')
 
                 //boolean operators
-                if(prog[progI+0] == '&' && prog[progI+1] == '&'){
-                    type = Type::LOGICAL_AND;
-                }
-                if(prog[progI+0] == '|' && prog[progI+1] == '|'){
-                    type = Type::LOGICAL_OR;
-                }
+                     ifBinOp(Type::LOGICAL_AND, '&', '&')
+                else ifBinOp(Type::LOGICAL_OR,  '|', '|')
 
                 if(type!=Type::EMPTY){
                     progI += 2;
                     return peeked = type;
                 }
             }
+#undef ifBinOp
 
             //ambiguous one character operators, ambiguity has been cleared by previous ifs
             switch(prog[progI+0]){
@@ -682,8 +666,7 @@ public:
 
 };
 
-// int: precedence, bool: rassoc
-static const std::unordered_map<Token::Type, std::tuple<int,bool>> operators = {
+static const std::unordered_map<Token::Type, std::tuple<int /* precedence */, bool /* is right-assoc */>> operators = {
     {Token::Type::L_BRACKET,           {14, false}},
     // unary: 13 (handled seperately)
     {Token::Type::TIMES,               {12, false}},

@@ -159,7 +159,8 @@ public:
     
 
     Type type;
-    std::string value{""}; // only used for identifiers and numbers
+    // TODO make this a string view at some point
+    std::string_view value{""}; // only used for identifiers and numbers
 
     // turns the tokens back into their original strings for pretty printing
     static string toString(Token::Type type){
@@ -221,7 +222,7 @@ public:
     }
 
     // includes implicit conversion from type to Token
-    Token(Type type, string value = "") : type(type), value(value) {}
+    Token(Type type, std::string_view value = "") : type(type), value(value) {}
 
 };
 
@@ -264,24 +265,19 @@ class UnexpectedTokenException :  public ParsingException {
 };
 
     static string initProg(std::ifstream& inputFile){
-        std::stringstream ss1;
-        ss1 << inputFile.rdbuf();
-        return ss1.str();
+        return string(std::istreambuf_iterator(inputFile), {})+" "; // to safely peek for two char ops at the end
     }
 
-    Tokenizer(string prog) : matched(emptyToken), prog(prog), peeked(emptyToken) {}
+    Tokenizer(string&& prog) : matched(emptyToken), prog(std::move(prog)), peeked(emptyToken) {}
 
     Tokenizer(std::ifstream& inputFile) : matched(emptyToken), prog(initProg(inputFile)), peeked(emptyToken) {
-        std::stringstream ss2;
-        ss2 << std::endl;
-        newline = ss2.str();
     }
 
     static const std::unordered_map<string, Token::Type> keywords; // initialized below
     const std::regex numberRegex{"[0-9]+"};
     const std::regex identifierRegex{"[a-zA-Z_][a-zA-Z0-9_]*"};
 
-    string newline;
+    const string newline{"\n"};
 
     Token matched;
 
@@ -329,9 +325,10 @@ class UnexpectedTokenException :  public ParsingException {
             if(isdigit(prog[progI])){
                 std::smatch match;
                 if(std::regex_search(prog.cbegin()+progI, prog.cend(), match, numberRegex)){
-                    string numStr = match[0];
-                    progI += numStr.size();
-                    return peeked = {Type::NUM, numStr};
+                    auto numStrMatch = match[0];
+                    auto len = numStrMatch.length();
+                    progI += len;
+                    return peeked = {Type::NUM, std::string_view(numStrMatch.first.base(), len)};
                 }
             }
 
@@ -339,21 +336,23 @@ class UnexpectedTokenException :  public ParsingException {
             if(isalpha(prog[progI]) || prog[progI] == '_'){
                 std::smatch match;
                 if(std::regex_search(prog.cbegin()+progI, prog.cend(), match, identifierRegex)){
-                    string idStr = match[0];
-                    progI += idStr.size();
+                    auto idStrMatch = match[0];
+                    auto len = idStrMatch.length();
+                    progI += len;
                     //check if it's a keyword
-                    if(keywords.contains(idStr)){
-                        return peeked = keywords.at(idStr);
+                    if(auto keywordTokenIt = keywords.find(idStrMatch.str()); keywordTokenIt != keywords.end()){
+                        return peeked = keywordTokenIt->second;
                     }else{
-                        return peeked = {Type::IDENTIFIER, idStr};
+                        return peeked = {Type::IDENTIFIER, std::string_view(idStrMatch.first.base(), len)};
                     }
                 }
             }
 
-            //single characters
             Type type = Token::Type::EMPTY;
-            //parentheses, brackets, braces, unabiguous operators, ...
+
             switch(prog[progI]){
+            //single characters
+            //parentheses, brackets, braces, unabiguous operators, ...
                 case '(': type = Type::L_PAREN;     break;
                 case ')': type = Type::R_PAREN;     break;
                 case '[': type = Type::L_BRACKET;   break;
@@ -370,46 +369,28 @@ class UnexpectedTokenException :  public ParsingException {
                 case '%': type = Type::MOD;         break;
                 case ';': type = Type::SEMICOLON;   break;
                 case ',': type = Type::COMMA;       break;
-            }
 
-            if(type!=Type::EMPTY){
-                progI++;
-                return peeked = type;
-            }
-
-#define ifBinOp(setTypeTo, c1, c2) if(prog[progI] == (c1) && prog[progI+1] == (c2)){ type = (setTypeTo); }
-
-            //two characters
-            if(prog.size()-progI >= 2){
-                //shift operators
-                     ifBinOp(Type::SHIFTL, '<', '<')
-                else ifBinOp(Type::SHIFTR, '>', '>');
-
-                //comparison operators
-                     ifBinOp(Type::LESS_EQUAL,     '<',  '=')
-                else ifBinOp(Type::GREATER_EQUAL,  '>',  '=')
-                else ifBinOp(Type::EQUAL,          '=',  '=')
-                else ifBinOp(Type::NOT_EQUAL,      '!',  '=')
-
-                //boolean operators
-                     ifBinOp(Type::LOGICAL_AND, '&', '&')
-                else ifBinOp(Type::LOGICAL_OR,  '|', '|')
-
-                if(type!=Type::EMPTY){
-                    progI += 2;
-                    return peeked = type;
-                }
-            }
-#undef ifBinOp
-
-            //ambiguous one character operators, ambiguity has been cleared by previous ifs
-            switch(prog[progI+0]){
-                case '<': type = Type::LESS;        break;
-                case '>': type = Type::GREATER;     break;
-                case '=': type = Type::ASSIGN;      break;
-                case '&': type = Type::AMPERSAND;   break;
-                case '|': type = Type::BITWISE_OR;  break;
-                case '!': type = Type::LOGICAL_NOT; break;
+            //ambiguous one/two character operators
+                case '<': if(prog[progI+1] == '=')      type = Type::LESS_EQUAL, progI++; 
+                          else if(prog[progI+1] == '<') type = Type::SHIFTL, progI++;
+                          else type = Type::LESS;
+                          break;
+                case '>': if(prog[progI+1] == '=')      type = Type::GREATER_EQUAL, progI++; 
+                          else if(prog[progI+1] == '>') type = Type::SHIFTR, progI++;
+                          else type = Type::GREATER;
+                          break;
+                case '=': if(prog[progI+1] == '=')      type = Type::EQUAL, progI++;
+                          else type = Type::ASSIGN;
+                          break;
+                case '&': if(prog[progI+1] == '&')      type = Type::LOGICAL_AND, progI++;
+                          else type = Type::AMPERSAND;
+                          break;
+                case '|': if(prog[progI+1] == '|')      type = Type::LOGICAL_OR, progI++;
+                          else type = Type::BITWISE_OR;
+                          break;
+                case '!': if(prog[progI+1] == '=')      type = Type::NOT_EQUAL, progI++;
+                          else type = Type::LOGICAL_NOT;
+                          break;
             }
 
             if(type!=Type::EMPTY){
@@ -492,48 +473,52 @@ static int nodeCounter = 0;
 class ASTNode{
 public:
     enum class Type{
-        NRoot, // possible children: function*
-        NFunction, // possible children: paramlist, block, name: yes
-        NParamList, // possible children: var*
-        NStmtDecl, // possible children: var, expr (*required* initializer), op: KW_AUTO/KW_REGISTER
-        NStmtReturn, // possible children: expr?
-        NStmtBlock, // possible children: statement*
-        NStmtWhile, // possible children: expr, statement
-        NStmtIf, // possible children: expr, stmt, stmt (optional else)
-        NExprVar, // possible children: none, name: yes, op: KW_AUTO/KW_REGISTER
-        NExprNum, // possible children: none, value: yes
-        NExprCall, // possible children: expr*, name: yes
-        NExprUnOp, // possible children: expr, op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
-        NExprBinOp, // possible children: expr, expr, op: yes (all the binary operators possible)
+        NRoot,          // possible children: [function*]
+        NFunction,      // possible children: [paramlist, block], name: yes
+        NParamList,     // possible children: [var*]
+        NStmtDecl,      // possible children: [var, expr (*required* initializer)], op: KW_AUTO/KW_REGISTER
+        NStmtReturn,    // possible children: [expr?]
+        NStmtBlock,     // possible children: [statement*]
+        NStmtWhile,     // possible children: [expr, statement]
+        NStmtIf,        // possible children: expr, stmt, stmt (optional else)
+        NExprVar,       // possible children: none, name: yes, op: KW_AUTO/KW_REGISTER
+        NExprNum,       // possible children: none, value: yes
+        NExprCall,      // possible children: expr*, name: yes
+        NExprUnOp,      // possible children: expr, op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
+        NExprBinOp,     // possible children: expr, expr, op: yes (all the binary operators possible)
         NExprSubscript, // possible children: expr(addr), expr(index), num (sizespec, 1/2/4/8)
     };
 
     class Hash{
-        public:
+    public:
         size_t operator()(const ASTNode& node) const{
-            return std::hash<string>()(node.uniqueDotIdentifier);
+            return node.nodeID;
         }
     };
 
     Type type;
-
-    string uniqueDotIdentifier;
+    uint64_t nodeID = nodeCounter++;
 
     static const std::unordered_map<Type, string> nodeTypeToDotIdentifier; // initialization below
     static const std::unordered_map<Type, std::vector<string>> nodeTypeToDotStyling; // initialization below
 
     //optional node attrs
+    // TODO make this a string view at some point
+    // TODO encapsulate these in a union to have a smaller memory footprint
+    // TODO also make a union for name | var_uID, so that parsing can use the names, semantic analysis turns them into uIDs, and codegen can use the uIDs
     string name;
     int64_t value;
-    Token::Type op; // for UnOp, BinOp, and decl/var
+    Token::Type op; // for UnOp, BinOp, and distinguishing auto vars from register vars
 
     std::vector<ASTNode> children{};
 
-    ASTNode(Type type, string name = "", Token::Type op = Token::Type::EMPTY) : type(type), name(name), op(op){
-        uniqueDotIdentifier = nodeTypeToDotIdentifier.at(type) + std::to_string(nodeCounter++);
+    ASTNode(Type type, string name = "", Token::Type op = Token::Type::EMPTY) : type(type), name(name), op(op){}
+
+    string uniqueDotIdentifier() const {
+        return nodeTypeToDotIdentifier.at(type) + "_" + std::to_string(nodeID);
     }
 
-    string toString() {
+    string toString() const {
         if(name.empty()){
             if(type == Type::NExprNum){
                 return std::to_string(value);
@@ -544,28 +529,17 @@ public:
             }
         }else{
             if(type == Type::NExprVar && op != Token::Type::EMPTY){
-                return  nodeTypeToDotIdentifier.at(type) + "(" + Token::toString(op) + ")" + ": " + name;
+                return nodeTypeToDotIdentifier.at(type) + "(" + Token::toString(op) + ")" + ": " + name;
             }else{
                 return nodeTypeToDotIdentifier.at(type) + ": " + name;
             }
         }
     }
 
-    void print(std::ostream& out, int indentDepth = 0){
-        string indent = "    ";
-        indent.append(4*indentDepth, ' ');
+    void printDOT(std::ostream& out, int indentDepth = 0, bool descend = true) const {
+        string indent(4*(indentDepth+1), ' ');
 
-        for(auto& child : children){
-            out << indent << toString() << " -> " << child.toString() << ";" << std::endl;
-            child.print(out, indentDepth+1);
-        }
-    }
-
-    void printDOT(std::ostream& out, int indentDepth = 0, bool descend = true){
-        string indent = "    ";
-        indent.append(4*indentDepth, ' ');
-
-        out << indent << uniqueDotIdentifier << " [label=\"" << toString() << "\"" ;
+        out << indent << uniqueDotIdentifier() << " [label=\"" << toString() << "\"" ;
         if(nodeTypeToDotStyling.contains(type)){
             for(auto& styleInstr : nodeTypeToDotStyling.at(type)){
                 out << ", " << styleInstr;
@@ -575,13 +549,13 @@ public:
 
         if(descend){
             for(auto& child : children){
-                out << indent << uniqueDotIdentifier << " -> " << child.uniqueDotIdentifier << ";" << std::endl;
+                out << indent << uniqueDotIdentifier() << " -> " << child.uniqueDotIdentifier() << ";" << std::endl;
                 child.printDOT(out, indentDepth+1);
             }
         }
     }
 
-    void iterateChildren(std::function<void(ASTNode&)> f){
+    inline void iterateChildren(std::function<void(ASTNode&)> f){
         for(auto& child : children){
             f(child);
             child.iterateChildren(f);
@@ -591,7 +565,7 @@ public:
 };
 
 std::ostream& operator<< (std::ostream& out, ASTNode& node){
-    node.print(out);
+    node.printDOT(out);
     return out;
 }
 
@@ -635,8 +609,8 @@ public:
         out << "digraph AST {" << std::endl;
         root.printDOT(out, 0, false);
         for(auto& child : root.children){
-            out << root.uniqueDotIdentifier << " -> " << child.uniqueDotIdentifier << ";" << std::endl;
-            out << "subgraph cluster_" << child.uniqueDotIdentifier << " {" << std::endl;
+            out << root.uniqueDotIdentifier() << " -> " << child.uniqueDotIdentifier() << ";" << std::endl;
+            out << "subgraph cluster_" << child.uniqueDotIdentifier() << " {" << std::endl;
             //function cluster styling
 
             out << "style=filled;" << std::endl;
@@ -648,10 +622,6 @@ public:
         }
 
         out << "}" << std::endl;
-    }
-
-    void print(std::ostream& out){
-        root.print(out);
     }
 
     size_t getRoughMemoryFootprint(){
@@ -697,7 +667,7 @@ class Parser{
 public:
     bool failed{false};
 
-    Parser(string prog) : tok{prog} {}
+    Parser(string&& prog) : tok{std::move(prog)} {}
 
     Parser(std::ifstream& inputFile) : tok{inputFile} {}
     // only called in case there is a return at the start of a statement -> throws exception if it fails
@@ -715,7 +685,7 @@ public:
             //if this returns normally, it means we have a valid initializer
             tok.assertToken(Token::Type::SEMICOLON);
             auto decl = ASTNode(ASTNode::Type::NStmtDecl, "", registerOrAuto);
-            decl.children.emplace_back(ASTNode::Type::NExprVar, varName.data(), registerOrAuto);
+            decl.children.emplace_back(ASTNode::Type::NExprVar, string(varName), registerOrAuto);
 
 
             decl.children.push_back(std::move(initializer));
@@ -807,9 +777,11 @@ public:
 
         if(tok.matchToken(Token::Type::NUM)){
             auto num = ASTNode(ASTNode::Type::NExprNum);
-            try{
-                num.value = std::stoll(tok.matched.value);;
-            } catch (std::out_of_range &e) {
+
+            const auto str = tok.matched.value;
+            auto [ptr, err] = std::from_chars(str.data(), str.data() + str.size(), num.value);
+
+            if (!(err == std::errc{} && ptr == str.data() + str.size())) {
                 num.value = 0;
                 std::cerr << "Line " << tok.getLineNum() << ": Warning: number " << tok.matched.value << " is out of range and will be truncated to 0" << std::endl;
             }
@@ -821,8 +793,7 @@ public:
         }else if(tok.matchToken(Token::Type::IDENTIFIER)){
             auto ident = tok.matched.value;
             if(tok.matchToken(Token::Type::L_PAREN)){
-                auto call = ASTNode(ASTNode::Type::NExprCall);
-                call.name = ident;
+                auto call = ASTNode(ASTNode::Type::NExprCall, string(ident));
                 while(!tok.matchToken(Token::Type::R_PAREN)){
                     call.children.emplace_back(parseExpr());
                     if(tok.matchToken(Token::Type::COMMA)){
@@ -835,7 +806,7 @@ public:
                 }
                 return call;
             }else{
-                return ASTNode(ASTNode::Type::NExprVar, ident.data());
+                return ASTNode(ASTNode::Type::NExprVar, string(ident));
             }
         }else if(tok.matchToken(Token::Type::L_PAREN)){
             auto expr = parseExpr(0);
@@ -929,7 +900,7 @@ public:
                             if(tok.matchToken(Token::Type::IDENTIFIER, false)){
                                 throw UnexpectedTokenException(tok, Token::Type::R_PAREN);
                             }
-                            paramlist.children.emplace_back(ASTNode::Type::NExprVar, paramname.data(), Token::Type::KW_REGISTER /* params are always registers */);
+                            paramlist.children.emplace_back(ASTNode::Type::NExprVar, string(paramname), Token::Type::KW_REGISTER /* params are always registers */);
                         }else{
                             throw UnexpectedTokenException(tok, Token::Type::R_PAREN);
                         }
@@ -946,7 +917,7 @@ public:
                 }
                 // at this point an R_PAREN or syntax error is guaranteed
                 auto body = parseBlock();
-                auto func = ASTNode(ASTNode::Type::NFunction, name.data());
+                auto func = ASTNode(ASTNode::Type::NFunction, string(name));
                 func.children.push_back(std::move(paramlist));
                 func.children.push_back(std::move(body));
                 return func;
@@ -982,12 +953,12 @@ namespace SemanticAnalysis{
 
     std::unordered_set<string> declaredFunctions{};
 
-#define SEMANTIC_ERROR(msg) \
+#define SEMANTIC_ERROR(msg) do{                                   \
     std::cerr << "Semantic Analysis error: " << msg << std::endl; \
-    failed = true
+    failed = true;                                                \
+    } while(0)
 
     // decls only contains variable (name, isRegister), because ASTNodes have no copy constructor and using a unique_ptr<>& doesn't work for some unknown reason
-    // feels like artemis man
     // quadratic in the number of variables/scopes (i.e. if both are arbitrarily large)
     void analyzeNode(ASTNode& node, std::vector<std::tuple<string,bool>> decls = {}) noexcept {
         //checks that declaratiosn happen before use
@@ -1145,9 +1116,9 @@ namespace ArgParse{
         const Arg input{     "i", "input"     , 1, "Input file"                                                                                          ,  true, false};
         const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)"           , false, true};
         const Arg output{    "o", "output"    , 2, "Output file for AST (requires -p)"                                                                   , false, false};
-        const Arg print{     "p", "print"     , 0, "Print AST (-d for DOT format highly recommended instead)"                                            , false, true};
         const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
         const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
+        // TODO remove
         const Arg nosemantic{"n", "nosemantic", 0, "Don't run semantic analysis on the AST"                                                              , false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
@@ -1161,7 +1132,7 @@ namespace ArgParse{
 
         const Arg sentinel{"", "", 0, "", false, false};
 
-        const Arg* const all[15] = {&help, &input, &dot, &output, &print, &preprocess, &url, &nosemantic, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
+        const Arg* const all[14] = {&help, &input, &dot, &output, &preprocess, &url, &nosemantic, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
         
         // iterator over all
         const Arg* begin() const{
@@ -1169,7 +1140,7 @@ namespace ArgParse{
         }
 
         const Arg* end() const{
-            return all[14];
+            return all[13];
         }
     } args;
 
@@ -4248,14 +4219,15 @@ int main(int argc, char *argv[]) {
     double regallocSeconds{0.0};
     double asmSeconds{0.0};
 
-    if(ArgParse::args.print() || parsedArgs.contains(ArgParse::args.dot) || parsedArgs.contains(ArgParse::args.url)){
+    if(parsedArgs.contains(ArgParse::args.dot) || parsedArgs.contains(ArgParse::args.url)){
         if(ArgParse::args.url()){
             std::stringstream ss;
             ast->printDOT(ss);
             auto compactSpacesRegex = std::regex("\\s+");
             auto str = std::regex_replace(ss.str(), compactSpacesRegex, " ");
             std::cout << "https://dreampuf.github.io/GraphvizOnline/#" << url_encode(str) << std::endl;
-        }else if(ArgParse::args.dot()){
+        } else {
+            assert(ArgParse::args.dot());
             if(ArgParse::args.output()){
                 std::ofstream outputFile{*ArgParse::args.output};
                 ast->printDOT(outputFile);
@@ -4263,8 +4235,6 @@ int main(int argc, char *argv[]) {
             }else{
                 ast->printDOT(std::cout);
             }
-        }else{
-            ast->print(std::cout);
         }
     }else {
         std::error_code errorCode;

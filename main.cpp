@@ -504,12 +504,13 @@ public:
 
     //optional node attrs
     // TODO make this a string view at some point
-    // TODO encapsulate these in a union to have a smaller memory footprint
-    // TODO also make a union for name | var_uID, so that parsing can use the names, semantic analysis turns them into uIDs, and codegen can use the uIDs
+    // TODO make a union for name | var_uID, so that parsing can use the names, semantic analysis turns them into uIDs, and codegen can use the uIDs
     string name;
-    int64_t value;
-    Token::Type op; // for UnOp, BinOp, and distinguishing auto vars from register vars
-
+    uint64_t varUID;
+    union{
+        int64_t value;
+        Token::Type op; // for UnOp, BinOp, and distinguishing auto vars from register vars
+    };
     std::vector<ASTNode> children{};
 
     ASTNode(Type type, string name = "", Token::Type op = Token::Type::EMPTY) : type(type), name(name), op(op){}

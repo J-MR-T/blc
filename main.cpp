@@ -1118,8 +1118,6 @@ namespace ArgParse{
         const Arg output{    "o", "output"    , 2, "Output file for AST (requires -p)"                                                                   , false, false};
         const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
         const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
-        // TODO remove
-        const Arg nosemantic{"n", "nosemantic", 0, "Don't run semantic analysis on the AST"                                                              , false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
         const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o.\n"
@@ -1132,7 +1130,7 @@ namespace ArgParse{
 
         const Arg sentinel{"", "", 0, "", false, false};
 
-        const Arg* const all[14] = {&help, &input, &dot, &output, &preprocess, &url, &nosemantic, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
+        const Arg* const all[13] = {&help, &input, &dot, &output, &preprocess, &url, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
         
         // iterator over all
         const Arg* begin() const{
@@ -1140,7 +1138,7 @@ namespace ArgParse{
         }
 
         const Arg* end() const{
-            return all[13];
+            return all[12];
         }
     } args;
 
@@ -4200,11 +4198,9 @@ int main(int argc, char *argv[]) {
         std::filesystem::remove(preprocessedFilePath);
 
     MEASURE_TIME_START(semanalyze);
-    if(!ArgParse::args.nosemantic()){
-        for(int i = 0; i<iterations; i++){
-            SemanticAnalysis::reset();
-            SemanticAnalysis::analyze(*ast);
-        }
+    for(int i = 0; i<iterations; i++){
+        SemanticAnalysis::reset();
+        SemanticAnalysis::analyze(*ast);
     }
     MEASURE_TIME_END(semanalyze);
 

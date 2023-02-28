@@ -1,4 +1,5 @@
 // RUN: %bc -l %s 2>&1 | FileCheck %s
+// RUN: %bc -l %s %t-1; %bc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | diff <(%t-1) -
 
 // CHECK-NOT: Warning
 fn(a,b,c){
@@ -19,5 +20,17 @@ fn(a,b,c){
     printf(fmt, y);
     printf(fmt, z);
 
+    return 0;
+}
+
+main(){
+    fn(1,2,3);
+    fn(-3,2,4);
+    fn(1,-1,3);
+    fn(0,3,2);
+    fn(1,5,3);
+    fn(1,4,2);
+    fn(8,4,1);
+    fn(5,2,3);
     return 0;
 }

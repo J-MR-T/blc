@@ -19,3 +19,7 @@ printnum(n){
     free(fmt);
     return 0;
 }
+
+randUpTo(n){
+    return rand() % n;
+}

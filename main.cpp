@@ -38,6 +38,8 @@
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/ADT/SmallSet.h>
+#include <llvm/ADT/StringMap.h>
+#include <llvm/ADT/StringSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/IR/Dominators.h>
@@ -73,6 +75,7 @@
 #pragma GCC diagnostic pop
 
 using std::string;
+using std::string_view;
 using std::unique_ptr;
 using std::literals::string_literals::operator""s;
 
@@ -159,8 +162,7 @@ public:
     
 
     Type type;
-    // TODO make this a string view at some point
-    std::string_view value{""}; // only used for identifiers and numbers
+    string_view value{""}; // only used for identifiers and numbers
 
     // turns the tokens back into their original strings for pretty printing
     static string toString(Token::Type type){
@@ -222,7 +224,7 @@ public:
     }
 
     // includes implicit conversion from type to Token
-    Token(Type type, std::string_view value = "") : type(type), value(value) {}
+    Token(Type type, string_view value = "") : type(type), value(value) {}
 
 };
 
@@ -328,7 +330,7 @@ class UnexpectedTokenException :  public ParsingException {
                     auto numStrMatch = match[0];
                     auto len = numStrMatch.length();
                     progI += len;
-                    return peeked = {Type::NUM, std::string_view(numStrMatch.first.base(), len)};
+                    return peeked = {Type::NUM, string_view(numStrMatch.first.base(), len)};
                 }
             }
 
@@ -343,7 +345,7 @@ class UnexpectedTokenException :  public ParsingException {
                     if(auto keywordTokenIt = keywords.find(idStrMatch.str()); keywordTokenIt != keywords.end()){
                         return peeked = keywordTokenIt->second;
                     }else{
-                        return peeked = {Type::IDENTIFIER, std::string_view(idStrMatch.first.base(), len)};
+                        return peeked = {Type::IDENTIFIER, string_view(idStrMatch.first.base(), len)};
                     }
                 }
             }
@@ -467,28 +469,56 @@ const std::unordered_map<string, Token::Type> Tokenizer::keywords = {
     {"return",                   Token::Type::KW_RETURN},
 };
 
+struct IdentifierInfo{
+    string_view name;
+    uint64_t uID;
+    enum Type {
+        UNKNOWN,
+        REGISTER,
+        AUTO,
+        FUNCTION,
+    } type;
 
-static int nodeCounter = 0;
+    static IdentifierInfo::Type fromTokenType(const Token::Type t){
+        switch(t){
+            case Token::Type::KW_AUTO:     return AUTO;
+            case Token::Type::KW_REGISTER: return REGISTER;
+            default:                       return UNKNOWN;
+        }
+    }
+
+    static string toString(Type t){
+        switch(t){
+            case UNKNOWN:   return "unknown";
+            case REGISTER:  return "register";
+            case AUTO:      return "auto";
+            case FUNCTION:  return "function";
+        }
+    }
+
+};
 
 class ASTNode{
 public:
     enum class Type{
         NRoot,          // possible children: [function*]
-        NFunction,      // possible children: [paramlist, block], name: yes
+        NFunction,      // possible children: [paramlist, block], identifier: yes
         NParamList,     // possible children: [var*]
-        NStmtDecl,      // possible children: [var, expr (*required* initializer)], op: KW_AUTO/KW_REGISTER
+        NStmtDecl,      // possible children: [expr (*required* initializer)], identifier: yes
         NStmtReturn,    // possible children: [expr?]
         NStmtBlock,     // possible children: [statement*]
-        NStmtWhile,     // possible children: [expr, statement]
-        NStmtIf,        // possible children: expr, stmt, stmt (optional else)
-        NExprVar,       // possible children: none, name: yes, op: KW_AUTO/KW_REGISTER
-        NExprNum,       // possible children: none, value: yes
-        NExprCall,      // possible children: expr*, name: yes
-        NExprUnOp,      // possible children: expr, op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
-        NExprBinOp,     // possible children: expr, expr, op: yes (all the binary operators possible)
-        NExprSubscript, // possible children: expr(addr), expr(index), num (sizespec, 1/2/4/8)
+        NStmtWhile,     // possible children: [expr, stmt]
+        NStmtIf,        // possible children: [expr, stmt, stmt (optional else)]
+        NExprVar,       // possible children: [], identifier: yes
+        NExprNum,       // possible children: [], value: yes
+        NExprCall,      // possible children: [expr*], name: yes
+        NExprUnOp,      // possible children: [expr], op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
+        NExprBinOp,     // possible children: [expr, expr], op: yes (all the binary operators possible)
+        NExprSubscript, // possible children: [expr(addr), expr(index), num (sizespec, 1/2/4/8)]
     };
 
+    /// maps the type of a node to the number of children it should have, used for error checking. -1 means arbitrary number of children
+    static const std::unordered_map<Type, int> numberOfChildren;
     class Hash{
     public:
         size_t operator()(const ASTNode& node) const{
@@ -497,43 +527,43 @@ public:
     };
 
     Type type;
+
+    static int nodeCounter; // initialized to 0 below
     uint64_t nodeID = nodeCounter++;
 
     static const std::unordered_map<Type, string> nodeTypeToDotIdentifier; // initialization below
     static const std::unordered_map<Type, std::vector<string>> nodeTypeToDotStyling; // initialization below
 
-    //optional node attrs
-    // TODO make this a string view at some point
-    // TODO make a union for name | var_uID, so that parsing can use the names, semantic analysis turns them into uIDs, and codegen can use the uIDs
-    string name;
-    uint64_t varUID;
+    /// node attributes
     union{
         int64_t value;
         Token::Type op; // for UnOp, BinOp, and distinguishing auto vars from register vars
+        IdentifierInfo ident;
     };
+
     std::vector<ASTNode> children{};
 
-    ASTNode(Type type, string name = "", Token::Type op = Token::Type::EMPTY) : type(type), name(name), op(op){}
+    ASTNode(Type type, string_view name = "", IdentifierInfo::Type t = IdentifierInfo::UNKNOWN) : type(type), ident({name, 0, t}) {}
+
+    ASTNode(Type type, string_view name, Token::Type t) : ASTNode(type, name, IdentifierInfo::fromTokenType(t)) {}
+
+    ASTNode(Type type, int64_t value) : type(type), value(value) {}
+
+    ASTNode(Type type, Token::Type op) : type(type), op(op) {}
 
     string uniqueDotIdentifier() const {
         return nodeTypeToDotIdentifier.at(type) + "_" + std::to_string(nodeID);
     }
 
     string toString() const {
-        if(name.empty()){
-            if(type == Type::NExprNum){
-                return std::to_string(value);
-            } else if (type == Type::NExprBinOp || type == Type::NExprUnOp){
-                return Token::toString(op);
-            }else {
-                return nodeTypeToDotIdentifier.at(type);
-            }
-        }else{
-            if(type == Type::NExprVar && op != Token::Type::EMPTY){
-                return nodeTypeToDotIdentifier.at(type) + "(" + Token::toString(op) + ")" + ": " + name;
-            }else{
-                return nodeTypeToDotIdentifier.at(type) + ": " + name;
-            }
+        if(type == Type::NExprNum){
+            return std::to_string(value);
+        } else if (type == Type::NExprBinOp || type == Type::NExprUnOp){
+            return Token::toString(op);
+        } else if (type == Type::NStmtDecl || type == Type::NExprVar){
+            return nodeTypeToDotIdentifier.at(type) + "(" + IdentifierInfo::toString(ident.type) + ")" + ": " + string(ident.name);
+        } else {
+            return nodeTypeToDotIdentifier.at(type);
         }
     }
 
@@ -563,6 +593,25 @@ public:
         }
     }
 
+};
+
+int ASTNode::nodeCounter = 0;
+
+const std::unordered_map<ASTNode::Type, int> ASTNode::numberOfChildren = {
+    {ASTNode::Type::NRoot,          -1},
+    {ASTNode::Type::NFunction,       2},
+    {ASTNode::Type::NParamList,     -1},
+    {ASTNode::Type::NStmtDecl,       1},
+    {ASTNode::Type::NStmtReturn,    -1},
+    {ASTNode::Type::NStmtBlock,     -1},
+    {ASTNode::Type::NStmtWhile,      2},
+    {ASTNode::Type::NStmtIf,        -1},
+    {ASTNode::Type::NExprVar,        0},
+    {ASTNode::Type::NExprNum,        0},
+    {ASTNode::Type::NExprCall,      -1},
+    {ASTNode::Type::NExprUnOp,       1},
+    {ASTNode::Type::NExprBinOp,      2},
+    {ASTNode::Type::NExprSubscript,  3},
 };
 
 std::ostream& operator<< (std::ostream& out, ASTNode& node){
@@ -635,6 +684,18 @@ public:
         return totalSize;
     }
 
+    bool validate(){
+        bool valid = true;
+        root.iterateChildren([&valid](ASTNode& node){
+            auto number = ASTNode::numberOfChildren.at(node.type);
+            if(number > 0 && node.children.size() != static_cast<size_t>(number)){
+                std::cerr << "Node " << node.uniqueDotIdentifier() << " has " << node.children.size() << " children, but should have " << number << "\n";
+                valid = false;
+            }
+        });
+        return valid;
+    }
+
 };
 
 static const std::unordered_map<Token::Type, std::tuple<int /* precedence */, bool /* is right-assoc */>> operators = {
@@ -685,9 +746,7 @@ public:
 
             //if this returns normally, it means we have a valid initializer
             tok.assertToken(Token::Type::SEMICOLON);
-            auto decl = ASTNode(ASTNode::Type::NStmtDecl, "", registerOrAuto);
-            decl.children.emplace_back(ASTNode::Type::NExprVar, string(varName), registerOrAuto);
-
+            auto decl = ASTNode(ASTNode::Type::NStmtDecl, varName, registerOrAuto);
 
             decl.children.push_back(std::move(initializer));
             return decl;
@@ -788,13 +847,13 @@ public:
             }
             return num;
         }else if(tok.matchToken(Token::Type::TILDE)||tok.matchToken(Token::Type::MINUS)||tok.matchToken(Token::Type::LOGICAL_NOT)||tok.matchToken(Token::Type::AMPERSAND)){ 
-            auto unOp = ASTNode(ASTNode::Type::NExprUnOp, "", tok.matched.type);
+            auto unOp = ASTNode(ASTNode::Type::NExprUnOp, tok.matched.type);
             unOp.children.emplace_back(parseExpr(13)); //unary ops have 13 prec, rassoc
             return unOp;
         }else if(tok.matchToken(Token::Type::IDENTIFIER)){
             auto ident = tok.matched.value;
             if(tok.matchToken(Token::Type::L_PAREN)){
-                auto call = ASTNode(ASTNode::Type::NExprCall, string(ident));
+                auto call = ASTNode(ASTNode::Type::NExprCall, ident);
                 while(!tok.matchToken(Token::Type::R_PAREN)){
                     call.children.emplace_back(parseExpr());
                     if(tok.matchToken(Token::Type::COMMA)){
@@ -807,7 +866,7 @@ public:
                 }
                 return call;
             }else{
-                return ASTNode(ASTNode::Type::NExprVar, string(ident));
+                return ASTNode(ASTNode::Type::NExprVar, ident);
             }
         }else if(tok.matchToken(Token::Type::L_PAREN)){
             auto expr = parseExpr(0);
@@ -876,7 +935,7 @@ public:
 
             int newPrec = rassoc ? prec : prec+1;
             ASTNode rhs = parseExpr(newPrec);
-            auto newLhs = ASTNode(ASTNode::Type::NExprBinOp, "", token.type);
+            auto newLhs = ASTNode(ASTNode::Type::NExprBinOp, token.type);
             newLhs.children.push_back(std::move(lhs));
             newLhs.children.push_back(std::move(rhs));
             lhs = std::move(newLhs);
@@ -892,7 +951,7 @@ public:
                     while(true){
                         if(tok.matchToken(Token::Type::R_PAREN)){
                             break;
-                        }else if(tok.matchToken(Token::Type::COMMA) && tok.matchToken(Token::Type::IDENTIFIER, false)){
+                        }else if(tok.matchToken(Token::Type::COMMA) && tok.matchToken(Token::Type::IDENTIFIER, /*advance*/ false)){
                             // a comma needs to be followed by an identifier, so this needs to be checked here, but let the next loop iteration actually handle the identifier
                             continue;
                         }else if(tok.matchToken(Token::Type::IDENTIFIER)){
@@ -901,7 +960,7 @@ public:
                             if(tok.matchToken(Token::Type::IDENTIFIER, false)){
                                 throw UnexpectedTokenException(tok, Token::Type::R_PAREN);
                             }
-                            paramlist.children.emplace_back(ASTNode::Type::NExprVar, string(paramname), Token::Type::KW_REGISTER /* params are always registers */);
+                            paramlist.children.emplace_back(ASTNode::Type::NExprVar, paramname, IdentifierInfo::REGISTER /* params are always registers */);
                         }else{
                             throw UnexpectedTokenException(tok, Token::Type::R_PAREN);
                         }
@@ -916,9 +975,9 @@ public:
                         throw e;
                     }
                 }
-                // at this point an R_PAREN or syntax error is guaranteed
+                // at this point either an R_PAREN or syntax error is guaranteed
                 auto body = parseBlock();
-                auto func = ASTNode(ASTNode::Type::NFunction, string(name));
+                auto func = ASTNode(ASTNode::Type::NFunction, name);
                 func.children.push_back(std::move(paramlist));
                 func.children.push_back(std::move(body));
                 return func;
@@ -949,128 +1008,193 @@ private:
 
 namespace SemanticAnalysis{
     bool failed{false};
-    std::unordered_map<string, int> externalFunctionsToNumParams{};
+    llvm::StringMap<int> externalFunctionsToNumParams{};
 #define EXTERNAL_FUNCTION_VARARGS -1
 
-    std::unordered_set<string> declaredFunctions{};
+    llvm::StringSet<> declaredFunctions{};
 
 #define SEMANTIC_ERROR(msg) do{                                   \
     std::cerr << "Semantic Analysis error: " << msg << std::endl; \
     failed = true;                                                \
     } while(0)
 
+    class Scopes{
+        struct DeclarationEntry{
+            IdentifierInfo* info;
+            uint16_t nestingLevel;
+            uint32_t declarationBlockNumberAtNestingLevel;
+        };
+
+        uint16_t currentNestedLevel{0};
+        /// describes how many blocks we have already visited in the current nesting level
+        /// -> together with nesting level, uniquely identifies a block
+        /// -> if at the declaration nesting level, this is the same as the current nesting level, then the declaration is a parent -> can use decl
+        llvm::SmallVector<uint32_t> passedBlocksPerNestingLevel{0};
+        llvm::StringMap<llvm::SmallVector<DeclarationEntry>> definitions{};
+
+    public:
+        void nest(){
+            currentNestedLevel++;
+            // if we visit the same nesting level repeatedly, we don't want to push an entry every time
+            if(currentNestedLevel >= passedBlocksPerNestingLevel.size())
+                passedBlocksPerNestingLevel.emplace_back(0);
+        }
+
+        void unnest(){
+            assert(currentNestedLevel > 0 && "unnesting too much");
+
+            // now that we unnest, we have passed a block in the current nesting level
+            passedBlocksPerNestingLevel[currentNestedLevel]++;
+            currentNestedLevel--;
+        }
+
+        void declareVariable(IdentifierInfo* info){
+            static uint64_t nextVarUID = 1; // start at 1 so that 0 is invalid/not set yet
+
+            assert(info->uID == 0 && "Variable which should be declared in the current scope already has a UID");
+
+            // we have to create a new UID for this variable
+            info->uID = nextVarUID++;
+
+            auto* decls = find(info->name);
+            if(decls){
+                // forbid same scope shadowing
+                if(decls->back().nestingLevel == currentNestedLevel){
+                    SEMANTIC_ERROR("Variable '" << info->name << "' already declared in this scope");
+                    return;
+                }
+                decls->emplace_back(info, currentNestedLevel, passedBlocksPerNestingLevel[currentNestedLevel]);
+            }else{
+                definitions.try_emplace(info->name, llvm::SmallVector<DeclarationEntry>(1, {info, currentNestedLevel, passedBlocksPerNestingLevel[currentNestedLevel]}));
+            }
+        }
+
+        IdentifierInfo* operator[](const string_view name){
+            if(auto* decls = find(name)){
+                return decls->back().info;
+            }
+            return nullptr;
+        }
+
+        void reset(){
+            currentNestedLevel = 0;
+            passedBlocksPerNestingLevel.clear();
+            definitions.clear();
+
+            passedBlocksPerNestingLevel.emplace_back(0);
+        }
+
+    private:
+        /// returns a pointer to the vector of declaration entries which's back is the correct declaration for the name at the current scope
+        /// returns nullptr if no declaration was found
+        inline llvm::SmallVector<DeclarationEntry>* find(const string_view name){
+            auto it = definitions.find(name);
+            if(it == definitions.end()) return nullptr;
+
+            auto& decls = it->second;
+            while(decls.size() > 0){
+                auto& [info, declaredNest, declaredBlockNum] = it->second.back();
+                if(declaredNest <= currentNestedLevel && declaredBlockNum == passedBlocksPerNestingLevel[declaredNest]){
+                    /// we have to be sure that the declaration happend "above" the current block
+                    /// and that it was declared in the same "parent/grandparent/great-grandparent/..." scope
+
+                    // we found a declaration in the current scope, it's at the back of the vector we return
+                    return &it->second;
+                }
+                // we found a declaration, but it was either not in a scope above, or in a scope that we have already passed, so it's unusable now, get rid of it
+                decls.pop_back();
+            }
+
+            return nullptr;
+        }
+
+    } scopes;
+
     // decls only contains variable (name, isRegister), because ASTNodes have no copy constructor and using a unique_ptr<>& doesn't work for some unknown reason
     // quadratic in the number of variables/scopes (i.e. if both are arbitrarily large)
-    void analyzeNode(ASTNode& node, std::vector<std::tuple<string,bool>> decls = {}) noexcept {
-        //checks that declaratiosn happen before use
+    void analyzeNode(ASTNode& node) noexcept {
+
+        //checks that declarations happen before use
         if(node.type == ASTNode::Type::NFunction){
             // add to declared, remove from external
-            declaredFunctions.insert(node.name);
-            externalFunctionsToNumParams.erase(node.name);
+            declaredFunctions.insert(node.ident.name);
+            externalFunctionsToNumParams.erase(node.ident.name);
 
             // add params to decls
             for(auto& param : node.children[0].children){
-                decls.emplace_back(param.name, true); // parameters are considered register variables
+                scopes.declareVariable(&param.ident);
             }
-            analyzeNode(node.children[1],decls);
+            analyzeNode(node.children[1]);
+
+            scopes.reset();
+            
+            // don't analyze them again
+            return;
         }else if(node.type == ASTNode::Type::NStmtBlock){
             // add local vars to decls
-            std::vector<string> sameScopeDecls{};
+            scopes.nest();
             for(auto& stmt : node.children){
                 if(stmt.type == ASTNode::Type::NStmtDecl){
-                    // right side needs to be evaluated first (with current decls!), then left side can be annotated
-                    analyzeNode(stmt.children[1],decls);
+                    // right side needs to be evaluated first, then left side can be annotated
+                    analyzeNode(stmt.children[0]);
 
-                    //forbid same scope shadowing
-                    if(std::find(sameScopeDecls.begin(), sameScopeDecls.end(), stmt.children[0].name) != sameScopeDecls.end()){
-                        SEMANTIC_ERROR("Variable \"" << stmt.children[0].name << "\" was declared twice in the same scope");
-                    }
-                    // this makes it even more horribly inefficient (and quadratic in even more cases), but it fixes the overriding of variables, which was problematic before
-                    // if id implement it again, i would do it with an unordered_map<string, ||some kind of list||> instead of a vector of tuples
-                    std::erase_if(decls,[&stmt](auto& decl){
-                        return std::get<0>(decl) == stmt.children[0].name;
-                    });
-                    sameScopeDecls.emplace_back(stmt.children[0].name);
-                    decls.emplace_back(stmt.children[0].name, stmt.op == Token::Type::KW_REGISTER);
-
-                    analyzeNode(stmt.children[0],decls);
+                    scopes.declareVariable(&stmt.ident);
                 }else{
                     try{
-                        analyzeNode(stmt,decls);
+                        analyzeNode(stmt);
                     }catch(std::runtime_error& e){
                         SEMANTIC_ERROR(e.what());
                     }
                 }
             }
+            scopes.unnest();
+
+            // don't analyze them again
+            return;
         }else if(node.type == ASTNode::Type::NExprCall){
-            if(!declaredFunctions.contains(node.name)){
-                if(externalFunctionsToNumParams.contains(node.name)){
-                    if(externalFunctionsToNumParams[node.name] !=  static_cast<int>(node.children.size())){
+            if(!declaredFunctions.contains(node.ident.name)){
+                if(auto pairIt = externalFunctionsToNumParams.find(node.ident.name); pairIt != externalFunctionsToNumParams.end()){
+                    if(pairIt->second !=  static_cast<int>(node.children.size())){
                         // we seem to have ourselves a vararg function we don't know anything about, so indicate that by setting the number of params to -1
-                        externalFunctionsToNumParams[node.name] = EXTERNAL_FUNCTION_VARARGS;
+                        pairIt->second = EXTERNAL_FUNCTION_VARARGS;
+                        // TODO does this even work?
+                        assert(externalFunctionsToNumParams[node.ident.name] == EXTERNAL_FUNCTION_VARARGS && "didnt work, go back");
                     }
                 }else{
-                    externalFunctionsToNumParams[node.name] = node.children.size();
+                    externalFunctionsToNumParams[node.ident.name] = node.children.size();
                 }
-            }
-            for(auto& arg : node.children){
-                analyzeNode(arg,decls);
             }
         }else if(node.type == ASTNode::Type::NExprVar){
-            // check if var is declared
-            bool found = false;
-            for(auto& decl : decls){
-                auto& [declName, isRegister] = decl;
-                if(declName == node.name){
-                    found = true;
-                    // add info about if its register/auto to node
-                    node.op = isRegister?Token::Type::KW_REGISTER:Token::Type::KW_AUTO;
-                    break;
-                }
+            auto* declInfo  = scopes[node.ident.name];
+            if(!declInfo){
+                return;
             }
-            if(!found){
-                SEMANTIC_ERROR("Variable " + node.name + " used before declaration");
-            }
+            // we could also try to pointer things up a bit and use the same identifier info for all nodes, but we would then just have a data union of an actual ident info and an ident info pointer, which doesn't save space. It only complicates the maintenance of things, and as this is only assigned once, there are also no redunandancy issues afterwards, so just duplicate it for simplicity.
+            node.ident.uID  = declInfo->uID;
+            node.ident.type = declInfo->type;
+
+            return;
         }else if((node.type == ASTNode::Type::NExprBinOp && node.op == Token::Type::ASSIGN) || (node.type == ASTNode::Type::NExprUnOp && node.op == Token::Type::AMPERSAND)){
             if(node.type == ASTNode::Type::NExprUnOp && node.children[0].type == ASTNode::Type::NExprVar){
                 // register variables and parameters are not permitted as operands to the unary addrof & operator
                 // subscript is fine and thus left out here
-                for(auto& decl : decls){
-                    string declName;
-                    bool isRegister;
-                    std::tie(declName,isRegister) = decl;
-                    if(isRegister && declName == node.children[0].name){
-                        SEMANTIC_ERROR("Cannot take the address of a register variable (or parameter)");
-                    }
+                if(scopes[node.children[0].ident.name]->type!=IdentifierInfo::AUTO){
+                    SEMANTIC_ERROR("Cannot take the address of a parameter or register variable");
                 }
             }
             // lhs/only child must be subscript or identifier
             if(node.children[0].type != ASTNode::Type::NExprSubscript && node.children[0].type != ASTNode::Type::NExprVar){
                 SEMANTIC_ERROR("LHS of assignment/addrof must be a variable or subscript array access, got node which prints as: " << std::endl << node);
             }
-            for(auto& child : node.children){
-                analyzeNode(child, decls);
-            }
-        }else if(node.type == ASTNode::Type::NStmtIf){
-            // forbid declarations as sole stmt of if/else
+        }else if(node.type == ASTNode::Type::NStmtIf || node.type == ASTNode::Type::NStmtWhile){
+            // forbid declarations as sole stmt of while/if/else
             if(node.children[1].type == ASTNode::Type::NStmtDecl || (node.children.size() > 2 && node.children[2].type == ASTNode::Type::NStmtDecl)){
-                SEMANTIC_ERROR("Declarations are not allowed as the sole statement in if/else");
-            }
-            for(auto& child : node.children){
-                analyzeNode(child, decls);
-            }
-        }else if(node.type == ASTNode::Type::NStmtWhile){
-            // forbid declarations as sole stmt of while
-            if(node.children[1].type == ASTNode::Type::NStmtDecl){
-                SEMANTIC_ERROR("Declarations are not allowed as the sole statement in while");
-            }
-            for(auto& child : node.children){
-                analyzeNode(child, decls);
+                SEMANTIC_ERROR("Declarations are not allowed as the sole statement in while/if/else");
             }
         }else{
-            for(auto& child : node.children){
-                analyzeNode(child, decls);
-            }
+        }
+        for(auto& child : node.children){
+            analyzeNode(child);
         }
     }
     
@@ -1084,8 +1208,9 @@ namespace SemanticAnalysis{
         externalFunctionsToNumParams.clear();
     }
 
-}
+} // end namespace SemanticAnalysis
 
+// comment out rest temporarily
 
 namespace ArgParse{
     struct Arg{
@@ -1171,7 +1296,7 @@ namespace ArgParse{
                 std::cerr << " (flag)";
             }
             std::cerr << std::endl;
-            std::cerr << "    " << arg.description << std::endl;
+            std::cerr << "    " << arg.description << std::endl; // TODO string replace all \n with \n \t here
         }
 
         std::cerr << 
@@ -1258,7 +1383,7 @@ cont:
         return parsedArgs;
     }
 
-}
+} // end namespace ArgParse
 
 
 // taken from https://stackoverflow.com/a/17708801
@@ -1342,15 +1467,17 @@ namespace Codegen{
 
     struct BasicBlockInfo{
         bool sealed{false};
-        std::unordered_map<string, llvm::Value*/*, string_hash, string_hash::transparent_key_equal*/> varmap{}; // couldn't get transparent lookup to work (string_hash has since been deleted)
+        llvm::DenseMap<uint64_t /* variable uid */, llvm::Value*> regVarmap{};
     };
 
-    std::unordered_map<llvm::BasicBlock*, BasicBlockInfo> blockInfo{};
-    std::unordered_map<llvm::PHINode*, ASTNode*> phisToResolve{};
+    llvm::DenseMap<uint64_t /* variable uid */, llvm::AllocaInst*> autoVarmap{};
+
+    llvm::DenseMap<llvm::BasicBlock*, BasicBlockInfo> blockInfo{};
+    llvm::DenseMap<llvm::PHINode*, ASTNode*> phisToResolve{};
 
 
     // REFACTOR: cache the result in a hash map
-    llvm::Function* findFunction(string& name){
+    llvm::Function* findFunction(llvm::StringRef name){
         auto fnIt = llvm::find_if(moduleUP->functions(), [&name](auto& func){return func.getName() == name;});
         if(fnIt == moduleUP->functions().end()){
             return nullptr;
@@ -1363,11 +1490,11 @@ namespace Codegen{
 
     // for different block for lookup/insert
     llvm::Value* wrapVarmapLookupForUse(llvm::BasicBlock* block, llvm::IRBuilder<>& irb, ASTNode& node) noexcept{
-        if(node.op == Token::Type::KW_REGISTER){
+        if(node.ident.type == IdentifierInfo::REGISTER){
             // this should be what we want for register vars, for auto vars we aditionally need to look up the alloca (and store it back if its an assignment, see the assignment below)
             return varmapLookup(block, node); // NOTE to self: this does work even though there is a pointer to the value in the varmap, because if the mapping gets updated, that whole pointer isn't the value anymore, nothing is changed about what it's pointing to.
         }else {
-            return irb.CreateLoad(i64, varmapLookup(block, node), node.name);
+            return irb.CreateLoad(i64, varmapLookup(block, node), node.ident.name);
         }
     }
 
@@ -1377,19 +1504,23 @@ namespace Codegen{
 
     // automatically creates phi nodes on demand
     llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
-        string& name = node.name;
+        uint64_t uID = node.ident.uID;
+        if(node.ident.type == IdentifierInfo::AUTO){
+            assert(autoVarmap.find(uID) != autoVarmap.end() && "auto var not found in varmap");
+            return autoVarmap[uID];
+        }
+
         auto& [sealed, varmap] = blockInfo[block];
-        auto valueType = (node.op == Token::Type::KW_REGISTER?i64:llvm::PointerType::get(ctx, 0));
-        if(varmap.contains(name)){
-            return varmap[name];
+        if(auto it = varmap.find(uID); it != varmap.end()){
+            return it->getSecond();
         }else{
             if(sealed){
                 // cache it, so we don't have to look it up every time
                 if(block->hasNPredecessors(1)){
-                    return varmap[name] = varmapLookup(block->getSinglePredecessor(), node);
+                    return varmap[uID] = varmapLookup(block->getSinglePredecessor(), node);
                 }else if(block->hasNPredecessors(0)){
                     // returning poison is quite reasonable, as anything here should never be used, or looked up (either unreachable, or entry block)
-                    return varmap[name] = llvm::PoisonValue::get(valueType);
+                    return varmap[uID] = llvm::PoisonValue::get(i64);
                 }else{ // > 1 predecessors
                     // create phi node to merge it
                     llvm::IRBuilder<> irb(block);
@@ -1398,8 +1529,8 @@ namespace Codegen{
                     if(nonphi!=nullptr){
                         irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                     }
-                    llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, it's at least one because of our algo, 2 because we have >1 preds
-                    varmap[name] = phi; // doing this here breaks a potential cycle in the following lookup, if we look up this same name and it points back here, we don't create another phi node, we use the existing one we just created
+                    llvm::PHINode* phi = irb.CreatePHI(i64, 2, node.ident.name); // num reserved values here is only a hint, it's at least one because of our algo, 2 because we have >1 preds
+                    varmap[uID] = phi; // doing this here breaks a potential cycle in the following lookup, if we look up this same name and it points back here, we don't create another phi node, we use the existing one we just created
                     
                     // block is sealed -> we have all the information -> we can add all the incoming values
                     for(auto pred:llvm::predecessors(block)){
@@ -1415,22 +1546,25 @@ namespace Codegen{
                 if(nonphi!=nullptr){
                     irb.SetInsertPoint(nonphi); // insertion is before the instruction, so this is the correct position
                 }
-                llvm::PHINode* phi = irb.CreatePHI(valueType, 2, name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
+                llvm::PHINode* phi = irb.CreatePHI(i64, 2, node.ident.name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
                 phisToResolve[phi] = &node;
                 
                 // incoming values/blocks get added by fillPHIs later
-                return varmap[name] = phi;
+                return varmap[uID] = phi;
             }
         }
     }
 
-    // just for convenience
-    inline llvm::Value*& updateVarmap(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
+    /// just for convenience
+    /// can *only* be called with register vars, as auto vars need to be looked up in the alloca map
+    inline llvm::Value* updateVarmap(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
+        assert(node.ident.type == IdentifierInfo::REGISTER && "can only update register vars with this method");
+
         auto& [sealed, varmap] = blockInfo[block];
-        return varmap[node.name] = val;
+        return varmap[node.ident.uID] = val;
     }
 
-    inline llvm::Value*& updateVarmap(llvm::IRBuilder<>& irb, ASTNode& node, llvm::Value* val) noexcept{
+    inline llvm::Value* updateVarmap(llvm::IRBuilder<>& irb, ASTNode& node, llvm::Value* val) noexcept{
         return updateVarmap(irb.GetInsertBlock(), node, val);
     }
 
@@ -1480,8 +1614,8 @@ namespace Codegen{
                     for(unsigned int i = 0; i < exprNode.children.size(); ++i){
                         args[i] = genExpr(exprNode.children[i], irb);
                     }
-                    auto callee = findFunction(exprNode.name);
-                    if(callee == nullptr) throw std::runtime_error("Something has gone seriously wrong here, got a call to a function that doesn't exist, but was neither forward declared, nor implicitly declared, its name is " + exprNode.name);
+                    auto callee = findFunction(exprNode.ident.name);
+                    assert(callee && "got a call to a function that doesn't exist, but was neither forward declared, nor implicitly declared, this should never happen");
                     if(args.size() != callee->arg_size()){
                         // hw02.txt: "Everything else is handled as in ANSI C", hw04.txt: "note that parameters/arguments do not need to match"
                         // but: from the latest C11 standard draft: "the number of arguments shall agree with the number of parameters"
@@ -1489,13 +1623,15 @@ namespace Codegen{
                         // "The effect of the call is undefined if the number of arguments disagrees with the number of parameters in the
                         // definition of the function", which is basically the same)
                         // so technically this is undefined behavior >:)
-                        if(SemanticAnalysis::externalFunctionsToNumParams.contains(exprNode.name) && SemanticAnalysis::externalFunctionsToNumParams[exprNode.name] == EXTERNAL_FUNCTION_VARARGS){
+                        if(auto it = SemanticAnalysis::externalFunctionsToNumParams.find(exprNode.ident.name); 
+                                it != SemanticAnalysis::externalFunctionsToNumParams.end() &&
+                                SemanticAnalysis::externalFunctionsToNumParams[exprNode.ident.name] == EXTERNAL_FUNCTION_VARARGS){
                             // in this case we can create a normal call
                             return irb.CreateCall(&*callee, args);
                         }else{
                             // otherwise, there is something weird going on
                             std::stringstream ss{};
-                            ss << "Call to function " << exprNode.name << " with " << args.size() << " arguments, but function has " << callee->arg_size() << " parameters";
+                            ss << "Call to function " << exprNode.ident.name << " with " << args.size() << " arguments, but function has " << callee->arg_size() << " parameters";
                             DEBUGLOG(ss.str());
                             warn(ss.str());
                             return llvm::PoisonValue::get(i64);
@@ -1625,11 +1761,13 @@ namespace Codegen{
 
                             auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
                             irb.CreateStore(cast, getelementpointer);
-                        }else if(/* lhs node has to be var if we're here */ lhsNode.op == Token::Type::KW_AUTO){
+                        }else if(/* lhs node has to be var if we're here */ lhsNode.ident.type == IdentifierInfo::AUTO){
                             irb.CreateStore(rhs, varmapLookup(irb.GetInsertBlock(), lhsNode));
                         }else{/* in this case it has to be a register variable */
                             // in lhs: "old" varname of the var we're assigning to -> update mapping
                             // in rhs: value to assign to it
+                            assert(lhsNode.ident.type == IdentifierInfo::REGISTER && "if lhs is not AUTO, it has to be REGISTER");
+
                             updateVarmap(irb, lhsNode, rhs);
                         }
                         return rhs; // just as before, return the result, not the store/assign/etc.
@@ -1639,39 +1777,23 @@ namespace Codegen{
                     // for all other cases this is a post order traversal of the epxr tree
 
                     switch(exprNode.op){
-                        case Token::Type::BITWISE_OR:
-                            return irb.CreateOr(lhs,rhs);
-                        case Token::Type::BITWISE_XOR:
-                            return irb.CreateXor(lhs,rhs);
-                        case Token::Type::AMPERSAND:
-                            return irb.CreateAnd(lhs,rhs);
-                        case Token::Type::PLUS:
-                            return irb.CreateAdd(lhs,rhs);
-                        case Token::Type::MINUS:
-                            return irb.CreateSub(lhs,rhs);
-                        case Token::Type::TIMES:
-                            return irb.CreateMul(lhs,rhs);
-                        case Token::Type::DIV:
-                            return irb.CreateSDiv(lhs,rhs);
-                        case Token::Type::MOD:
-                            return irb.CreateSRem(lhs,rhs);
-                        case Token::Type::SHIFTL:
-                            return irb.CreateShl(lhs,rhs);
-                        case Token::Type::SHIFTR:
-                            return irb.CreateAShr(lhs,rhs);
+                        case Token::Type::BITWISE_OR:    return irb.CreateOr(lhs,rhs);
+                        case Token::Type::BITWISE_XOR:   return irb.CreateXor(lhs,rhs);
+                        case Token::Type::AMPERSAND:     return irb.CreateAnd(lhs,rhs);
+                        case Token::Type::PLUS:          return irb.CreateAdd(lhs,rhs);
+                        case Token::Type::MINUS:         return irb.CreateSub(lhs,rhs);
+                        case Token::Type::TIMES:         return irb.CreateMul(lhs,rhs);
+                        case Token::Type::DIV:           return irb.CreateSDiv(lhs,rhs);
+                        case Token::Type::MOD:           return irb.CreateSRem(lhs,rhs);
+                        case Token::Type::SHIFTL:        return irb.CreateShl(lhs,rhs);
+                        case Token::Type::SHIFTR:        return irb.CreateAShr(lhs,rhs);
 
-                        case Token::Type::LESS:
-                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs));
-                        case Token::Type::GREATER:
-                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs));
-                        case Token::Type::LESS_EQUAL:
-                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs));
-                        case Token::Type::GREATER_EQUAL:
-                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs));
-                        case Token::Type::EQUAL:
-                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs));
-                        case Token::Type::NOT_EQUAL:
-                            return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs));
+                        case Token::Type::LESS:          return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs));
+                        case Token::Type::GREATER:       return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs));
+                        case Token::Type::LESS_EQUAL:    return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs));
+                        case Token::Type::GREATER_EQUAL: return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs));
+                        case Token::Type::EQUAL:         return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs));
+                        case Token::Type::NOT_EQUAL:     return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs));
                         /* non-short circuiting variants of the logical ops
                         case Token::Type::LOGICAL_AND:
                             {
@@ -1726,18 +1848,17 @@ namespace Codegen{
         }
     }
 
-    void genStmts(std::vector<ASTNode>& stmts, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls);
+    void genStmts(std::vector<ASTNode>& stmts, llvm::IRBuilder<>& irb);
 
-    void genStmt(ASTNode& stmtNode, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls){
+    void genStmt(ASTNode& stmtNode, llvm::IRBuilder<>& irb){
         switch(stmtNode.type){
             case ASTNode::Type::NStmtDecl:
                 {
-                    auto initializer = genExpr(stmtNode.children[1], irb);
+                    // TODO NStmtDecl only has one child (initializer) anymore, so rework this
+                    auto initializer = genExpr(stmtNode.children[0], irb);
 
-                    // so we can remove them on leaving the scope
-                    scopeDecls.emplace(stmtNode.children[0].name);
                     // i hope setting names doesn't hurt performance, but it wouldn't make sense if it did
-                    if(stmtNode.op == Token::Type::KW_AUTO){
+                    if(stmtNode.ident.type == IdentifierInfo::AUTO){
                         auto entryBB = &currentFunction->getEntryBlock();
                         auto nonphi = entryBB->getFirstNonPHI();
                         llvm::IRBuilder<> entryIRB(entryBB, entryBB->getFirstInsertionPt()); // i hope this is correct
@@ -1745,15 +1866,14 @@ namespace Codegen{
                             entryIRB.SetInsertPoint(nonphi);
                         }
 
-                        auto alloca = entryIRB.CreateAlloca(i64); // this returns the ptr to the alloca'd memory
-                        alloca->setName(stmtNode.children[0].name);
+                        auto alloca = entryIRB.CreateAlloca(i64, nullptr, stmtNode.ident.name); // this returns the ptr to the alloca'd memory
                         irb.CreateStore(initializer, alloca);
 
-                        updateVarmap(irb, stmtNode.children[0], alloca); // we actually want to save the ptr (cast to an int, because everything is an int, i hope there arent any provenance problems here) to the alloca'd memory, not the initializer
-                    }else if(stmtNode.op == Token::Type::KW_REGISTER){
-                        updateVarmap(irb, stmtNode.children[0], initializer);
+                        autoVarmap[stmtNode.ident.uID] = alloca;
+                    }else if(stmtNode.ident.type == IdentifierInfo::REGISTER){
+                        updateVarmap(irb, stmtNode, initializer);
                     }else{
-                        throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(stmtNode.op) + " as decl type");
+                        assert(false && "Invalid identifier type");
                     }
                 }
                 break;
@@ -1769,33 +1889,7 @@ namespace Codegen{
                 }
                 break;
             case ASTNode::Type::NStmtBlock:
-                {
-                    // safe because the strings (variable names) are constant -> can't invalidate set invariants/hashes
-                    // I know this is quite slow and in retrospect I would have designed my datastructure differently to retain information about scopes during the semantic analysis, but thats not really easily possible anymore at this stage
-                    std::unordered_set<std::string_view> scopeDecls{};
-
-                    auto varmapCopy = blockInfo[irb.GetInsertBlock()].varmap;
-                    genStmts(stmtNode.children, irb, scopeDecls);
-                    // leaving the scope == leaving the block, so for every scope we leave, we can handle it here
-                    // new idea: keep track of all declarations made in the current scope, and upon leaving:
-                    // 1. if they are not present in the varmapCopy: remove them from the varmap
-                    // 2. if they are present there: copy them from the varmapCopy
-                    // this is also not the fastest, but it should work
-
-                    auto& [_, varmap] = blockInfo[irb.GetInsertBlock()];
-
-                    for(std::string_view decl: scopeDecls){
-                        // I sadly couldn't get heterogeneous/transparent lookup for the varmap to work, so we have to do this, which makes it even slower :(
-                        string declStr{decl};
-                        if(varmapCopy.contains(declStr)){
-                            varmap[declStr] = varmapCopy[declStr];
-                        }else{
-                            varmap.erase(declStr);
-                        }
-                    }
-
-                    // after leaving the scope, the decls are thrown away
-                }
+                genStmts(stmtNode.children, irb);
                 break;
             case ASTNode::Type::NStmtIf:
                 {
@@ -1818,7 +1912,7 @@ namespace Codegen{
                     // var map is queried recursively anyway, would be a waste to copy it here
 
                     irb.SetInsertPoint(thenBB);
-                    genStmt(stmtNode.children[1], irb, scopeDecls);
+                    genStmt(stmtNode.children[1], irb);
                     auto thenBlock = irb.GetInsertBlock();
 
                     bool thenBranchesToCont = !(thenBlock->getTerminator());
@@ -1831,7 +1925,7 @@ namespace Codegen{
                     elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
                     if(hasElse){
                         irb.SetInsertPoint(elseBB);
-                        genStmt(stmtNode.children[2], irb, scopeDecls);
+                        genStmt(stmtNode.children[2], irb);
                         auto elseBlock = irb.GetInsertBlock();
 
                         bool elseBranchesToCont = !(elseBlock->getTerminator());
@@ -1871,7 +1965,7 @@ namespace Codegen{
                     blockInfo[bodyBB].sealed = true; // can only get into body block from condition block -> all predecessors are known
 
                     irb.SetInsertPoint(bodyBB);
-                    genStmt(stmtNode.children[1], irb, scopeDecls);
+                    genStmt(stmtNode.children[1], irb);
                     auto bodyBlock = irb.GetInsertBlock();
 
                     bool bodyBranchesToCond = !(bodyBlock->getTerminator());
@@ -1906,9 +2000,9 @@ namespace Codegen{
         }
     }
 
-    void genStmts(std::vector<ASTNode>& stmts, llvm::IRBuilder<>& irb, std::unordered_set<std::string_view>& scopeDecls){
+    void genStmts(std::vector<ASTNode>& stmts, llvm::IRBuilder<>& irb){
         for(auto& stmt : stmts){
-            genStmt(stmt, irb, scopeDecls);
+            genStmt(stmt, irb);
             if(stmt.type == ASTNode::Type::NStmtReturn){
                 // stop the generation for this block
                 break;
@@ -1919,7 +2013,7 @@ namespace Codegen{
     void genFunction(ASTNode& fnNode){
         auto paramNum = fnNode.children[0].children.size();
         auto typelist = llvm::SmallVector<llvm::Type*, 8>(paramNum, i64);
-        llvm::Function* fn = findFunction(fnNode.name);
+        llvm::Function* fn = findFunction(fnNode.ident.name);
         currentFunction = fn;
         llvm::BasicBlock* entryBB = llvm::BasicBlock::Create(ctx, "entry", fn);
         // simply use getEntryBlock() on the fn when declarations need to be added
@@ -1928,14 +2022,13 @@ namespace Codegen{
 
         for(unsigned int i = 0; i < paramNum; i++){
             llvm::Argument* arg = fn->getArg(i);
-            auto& name = fnNode.children[0].children[i].name;
+            auto& name = fnNode.children[0].children[i].ident.name;
             arg->setName(name);
             updateVarmap(irb, fnNode.children[0].children[i], arg);
         }
 
         auto& blockNode = fnNode.children[1];
-        std::unordered_set<std::string_view> empty; // its fine to leave it uninitialized, because this child is always a block -> generates a new and actually useful scope decls anyway
-        genStmt(blockNode, irb, empty); // calls gen stmts on the blocks children, but does additional stuff
+        genStmt(blockNode, irb); // calls gen stmts on the blocks children, but does additional stuff
 
         auto insertBlock = irb.GetInsertBlock();
         if(insertBlock->hasNUses(0) && insertBlock!=&currentFunction->getEntryBlock()){
@@ -1955,7 +2048,8 @@ namespace Codegen{
         ASTNode& root = ast.root;
 
         // declare implicitly declared functions
-        for(auto& [fnName, fnParamCount]: SemanticAnalysis::externalFunctionsToNumParams){
+        for(auto& entry: SemanticAnalysis::externalFunctionsToNumParams){
+            auto fnParamCount = entry.second;
             llvm::SmallVector<llvm::Type*, 8> params;
             if(fnParamCount == EXTERNAL_FUNCTION_VARARGS){
                 params = {};
@@ -1964,7 +2058,7 @@ namespace Codegen{
 
             }
             llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, params, fnParamCount == EXTERNAL_FUNCTION_VARARGS);
-            llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnName, moduleUP.get()); 
+            llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, entry.first(), moduleUP.get()); 
         }
 
         // declare all functions in the file, to easily allow forward declarations
@@ -1973,14 +2067,14 @@ namespace Codegen{
             auto paramNum = fnNode.children[0].children.size();
             auto typelist = llvm::SmallVector<llvm::Type*, 8>(paramNum, i64);
             llvm::FunctionType* fnTy = llvm::FunctionType::get(i64, typelist, false);
-            if(findFunction(fnNode.name)){
-                std::cerr << "fatal error: redefinition of function '" << fnNode.name << "'\n";
+            if(findFunction(fnNode.ident.name)){
+                std::cerr << "fatal error: redefinition of function '" << fnNode.ident.name << "'\n";
                 return false;
             }
-            llvm::Function* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnNode.name, moduleUP.get());
+            llvm::Function* fn = llvm::Function::Create(fnTy, llvm::GlobalValue::ExternalLinkage, fnNode.ident.name, moduleUP.get());
             for(unsigned int i = 0; i < paramNum; i++){
                 llvm::Argument* arg = fn->getArg(i);
-                auto& name = fnNode.children[0].children[i].name;
+                auto& name = fnNode.children[0].children[i].ident.name;
                 arg->setName(name);
             }
         }
@@ -1993,24 +2087,17 @@ namespace Codegen{
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
         if(out){
             moduleUP->print(*out, nullptr);
-
-            if(moduleIsBroken) 
-                llvm::errs() << "Generating LLVM IR failed :(.\nIndividual errors displayed above\n";
-            else if(warningsGenerated)
-                llvm::errs() << "Warnings were generated during code generation, please check the output for more information\n";
         }
+
+        if(warningsGenerated)
+            llvm::errs() << "Warnings were generated during code generation, please check the output for more information\n";
         return !moduleIsBroken;
     }
 
-}
+} // end namespace CodeGen
 
 
 /*
- ------------------------------------------------------------------------------------------------------
- HW 6 START
-
- Please see samples/ directory for some examples of low level optimizations implemented :)
- ------------------------------------------------------------------------------------------------------
  Subset of LLVM IR used (checks/not checks: done/not done):
  - Format: <instr>  [<operand type(s)>]
  - [x] Alloca           [i64]
@@ -4191,6 +4278,7 @@ int main(int argc, char *argv[]) {
     unique_ptr<AST> ast;
     for(int i = 0; i<iterations; i++){
         ast = parser.parse();
+        assert(ast->validate() && "the parser should always produce a valid AST");
         parser.resetTokenizer();
     }
     MEASURE_TIME_END(parse);
@@ -4241,7 +4329,7 @@ int main(int argc, char *argv[]) {
 
         MEASURE_TIME_START(codegen);
         if(!(genSuccess = Codegen::generate(*ast, ArgParse::args.llvm() ? &llvmOut : nullptr))){
-            llvm::errs() << "Codegen failed\nIndividual errors displayed above\n";
+            llvm::errs() << "Generating LLVM-IR failed :(\nIndividual errors displayed above\n";
             goto continu;
         }
         MEASURE_TIME_END(codegen);

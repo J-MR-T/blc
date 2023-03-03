@@ -20,7 +20,7 @@ jobs:
     - name: Install lit
       run: pip install lit
     - name: Install FileCheck
-      run: apt install llvm-15-tools && ln -s /usr/bin/FileCheck-15 /usr/bin/FileCheck
+      run: sudo apt install llvm-15-tools && sudo ln -s /usr/bin/FileCheck-15 /usr/bin/FileCheck
     - name: Cache LLVM and Clang
       id: cache-llvm
       uses: actions/cache@v2

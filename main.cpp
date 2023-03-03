@@ -4398,16 +4398,30 @@ int main(int argc, char *argv[]) {
                 dest.flush();
             }
 
-            // link
-            if(auto ret = execute(
-                    "ld",
-                    "-o", (*ArgParse::args.output).c_str(),
-                    tempObjFileName.c_str(),
-                    "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o");
-                ret != ExitCode::SUCCESS)
-                return ret;
+            auto ex = [](auto p) {return std::filesystem::exists(p);};
 
-            std::filesystem::remove(tempObjFileName);
+            // link
+            if(ex("/lib/ld-linux-x86-64.so.2") && ex("/lib/crt1.o") && ex("/lib/crti.o") && ex("/lib/crtn.o")){
+                if(auto ret = execute(
+                            "ld",
+                            "-o", (*ArgParse::args.output).c_str(),
+                            tempObjFileName.c_str(),
+                            "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o");
+                        ret != ExitCode::SUCCESS)
+                    return ret;
+            }else{
+                // just use gcc in that case
+                if(auto ret = execute(
+                            "gcc",
+                            "-lc",
+                            "-o", (*ArgParse::args.output).c_str(),
+                            tempObjFileName.c_str());
+                        ret != ExitCode::SUCCESS)
+                    return ret;
+            }
+
+
+            //std::filesystem::remove(tempObjFileName);
 
         }else if(!ArgParse::args.llvm()){
             // isel

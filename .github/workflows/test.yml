@@ -17,6 +17,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    - name: Install lit
+      run: pip install lit
     - name: Cache LLVM and Clang
       id: cache-llvm
       uses: actions/cache@v2
@@ -30,6 +32,6 @@ jobs:
       with:
         version: "15"
         cached: ${{ steps.cache-llvm.outputs.cache-hit }}
-    - name: test
+    - name: Test
       run: make test
 

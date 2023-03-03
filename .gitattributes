@@ -1,0 +1,2 @@
+# there isn't a simple 'exclude from stats' option, so we have to abuse either documentation or vendored, to exclude the test b files
+*.b linguist-documentation

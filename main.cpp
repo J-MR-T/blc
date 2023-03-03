@@ -2976,9 +2976,7 @@ namespace Codegen::ISel{
                 }
 
                 auto indexOp = OP_N(gep, 1);
-                DEBUGLOG("indexOp: " << *indexOp);
-                llvm::ConstantInt* indexConst;
-                if((indexConst = llvm::dyn_cast_or_null<llvm::ConstantInt>(indexOp))!= nullptr){
+                if(auto indexConst = llvm::dyn_cast_or_null<llvm::ConstantInt>(indexOp)){
                     auto index = indexConst->getSExtValue();
                     return irb.CreateCall(instructionFunctions[ARM_add], {OP_N_MAT(intToPtr,0), irb.getInt64(index << shiftInt)});
                 } else {
@@ -3034,7 +3032,6 @@ namespace Codegen::ISel{
                     auto brTrue = irb.CreateCall(instructionFunctions[ARM_b_cond], {cmp});
                     llvmSetStringMetadata(brTrue, "pred", predStr);
                     llvmSetStringMetadata(brTrue, "label", trueBlock->getName());
-                    DEBUGLOG("on true branch: " << *brTrue);
                 }
 
                 // fallthrough
@@ -3556,8 +3553,6 @@ namespace Codegen::RegAlloc{
             // erase later on using this set:
             toEraseLater.insert(&phi);
         }
-
-        DEBUGLOG("done with phi nodes");
     }
 
     void regallocFn(llvm::Function& f){
@@ -3592,13 +3587,10 @@ namespace Codegen::RegAlloc{
             // cannot set metadata on function parameters, so this has to be implicit
         }
 
-        llvm::DominatorTree DT = llvm::DominatorTree(f);
-
         // i hope this encounters stuff in the correct order
         // I think it does, *except for the arguments of phi nodes*! -> either handle phis before everything else and insert a pseudo reference, to a value that is not yet defined (but will be defined in the same block by the register allocator later)
-        for(auto& bbNode: llvm::depth_first(&DT)){
-            auto bb = bbNode->getBlock();
-            for(auto& inst: llvm::make_early_inc_range(*bb)){
+        for(auto& bb: f){
+            for(auto& inst: llvm::make_early_inc_range(bb)){
                 if(auto call = llvm::dyn_cast_if_present<llvm::CallInst>(&inst)){
                     // pseudo stores for phis
                     if (call->getCalledFunction() == instructionFunctions[ARM_PSEUDO_str]) {
@@ -3686,11 +3678,10 @@ namespace Codegen::RegAlloc{
         for(auto phi: phisToEraseLater){
 
 #ifndef NDEBUG
-            for(auto& use: phi->uses()){
-                DEBUGLOG("phi " << phi->getName().str() << " has use in " << *use.getUser());
-            }
+            if(!phi->use_empty())
+                for(auto& use: phi->uses())
+                    assert(llvm::isa<llvm::PHINode>(use.get()) && "phi which is about to be deleted should only be used by other phis (so effectively no uses anymore)");
 #endif
-            assert(phi->use_empty() && "phi still has uses, but is about to be deleted");
             phi->deleteValue();
         }
     }
@@ -3800,7 +3791,6 @@ namespace Codegen{
         void emitReg(llvm::CallInst* call){
             static_assert(bitwidth == 32 || bitwidth == 64, "bitwidth must be 32 or 64");
 
-            DEBUGLOG("emitting for call: " << *call)
             assert(call->hasMetadata("reg") && "instruction has no reg metadata");
             int regNum = dyn_cast<llvm::ConstantAsMetadata>(call->getMetadata("reg")->getOperand(0))->getValue()->getUniqueInteger().getZExtValue();
             // i hope the compiler optimizes this in the 2 generated cases, but i don't see why it wouldn't

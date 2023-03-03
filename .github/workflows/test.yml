@@ -21,6 +21,10 @@ jobs:
       run: pip install lit
     - name: Install FileCheck
       run: sudo apt install llvm-15-tools && sudo ln -s /usr/bin/FileCheck-15 /usr/bin/FileCheck
+    - name: Install aarch64-gnu-linux-gcc
+      run: sudo apt install gcc-aarch64-linux-gnu
+    - name: Install qemu
+      run: sudo apt install qemu-user
     - name: Cache LLVM and Clang
       id: cache-llvm
       uses: actions/cache@v2

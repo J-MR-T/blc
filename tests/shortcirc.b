@@ -1,5 +1,5 @@
-// RUN: %bc -lE %s %t && %t | FileCheck %s
-// RUN: %bc -aE %s | aarch64-linux-gnu-gcc -g -x assembler -o %t1 - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t1 | FileCheck %s
+// RUN: %blc -lE %s %t && %t | FileCheck %s
+// RUN: %blc -aE %s | aarch64-linux-gnu-gcc -g -x assembler -o %t1 - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t1 | FileCheck %s
 
 #include "lib.b"
 

@@ -1,4 +1,4 @@
-// RUN: cc %S/euler.c -o %t-euler && %bc -l %s %t && %t | diff - <(%t-euler)
+// RUN: cc %S/euler.c -o %t-euler && %blc -l %s %t && %t | diff - <(%t-euler)
 
 // from https://en.wikipedia.org/wiki/B_(programming_language)
 

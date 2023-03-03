@@ -1,5 +1,5 @@
-// RUN: %bc -l %s 2>&1 | FileCheck %s
-// RUN: %bc -l %s %t-1; %bc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | diff <(%t-1) -
+// RUN: %blc -l %s 2>&1 | FileCheck %s
+// RUN: %blc -l %s %t-1; %blc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | diff <(%t-1) -
 
 // CHECK-NOT: Warning
 fn(a,b,c){

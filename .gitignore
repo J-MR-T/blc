@@ -2,10 +2,8 @@
 
 compile_commands.json
 main
-bc
+blc
 .cache/**
-
-*-037*
 
 doc
 

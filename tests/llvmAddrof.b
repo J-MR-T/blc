@@ -1,5 +1,5 @@
-// RUN: %bc -l %s %t && %t | FileCheck %s
-// RUN: %bc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | FileCheck %s
+// RUN: %blc -l %s %t && %t | FileCheck %s
+// RUN: %blc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | FileCheck %s
 
 main(){
     register fmt = calloc(16,1);

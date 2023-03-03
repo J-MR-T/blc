@@ -1,4 +1,4 @@
-// RUN: %bc -l %s 2>&1 | FileCheck %s
+// RUN: %blc -l %s 2>&1 | FileCheck %s
 
 // CHECK-NOT: Warning
 fn(){

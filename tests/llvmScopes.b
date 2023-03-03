@@ -1,4 +1,4 @@
-// RUN: %bc -l %s %t && %t | FileCheck %s
+// RUN: %blc -l %s %t && %t | FileCheck %s
 
 println(){
     register fmt = calloc(2,1);

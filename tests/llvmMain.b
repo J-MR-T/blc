@@ -1,6 +1,6 @@
-// RUN: %bc -l %s %t && %t | FileCheck %s
-// RUN: %bc -r %s 2>&1 | FileCheck --check-prefix=CHECK-REGALLOC %s
-// RUN: %bc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | FileCheck %s
+// RUN: %blc -l %s %t && %t | FileCheck %s
+// RUN: %blc -r %s 2>&1 | FileCheck --check-prefix=CHECK-REGALLOC %s
+// RUN: %blc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | FileCheck %s
 
 // CHECK-REGALLOC-NOT: RegAlloc broke module
 

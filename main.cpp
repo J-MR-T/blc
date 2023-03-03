@@ -4420,8 +4420,7 @@ int main(int argc, char *argv[]) {
                     return ret;
             }
 
-
-            //std::filesystem::remove(tempObjFileName);
+            std::filesystem::remove(tempObjFileName);
 
         }else if(!ArgParse::args.llvm()){
             // isel

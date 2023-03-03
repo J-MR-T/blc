@@ -32,11 +32,11 @@ jobs:
         path: |
           C:/Program Files/LLVM
           ./llvm
-        key: llvm-15
+        key: llvm-15.0.6
     - name: Install LLVM and Clang
       uses: KyleMayes/install-llvm-action@v1
       with:
-        version: "15"
+        version: "15.0.6"
         cached: ${{ steps.cache-llvm.outputs.cache-hit }}
     - name: Test
       run: make test

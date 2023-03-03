@@ -1252,6 +1252,8 @@ namespace SemanticAnalysis{
             if(auto* decls = find(name)){
                 return decls->back().info;
             }
+
+            SEMANTIC_ERROR("Variable '" << name << "' used but not declared");
             return nullptr;
         }
 
@@ -1355,7 +1357,7 @@ namespace SemanticAnalysis{
             if(node.type == ASTNode::Type::NExprUnOp && node.children[0].type == ASTNode::Type::NExprVar){
                 // register variables and parameters are not permitted as operands to the unary addrof & operator
                 // subscript is fine and thus left out here
-                if(scopes[node.children[0].ident.name]->type!=IdentifierInfo::AUTO){
+                if(auto declIdentInfo = scopes[node.children[0].ident.name]; !declIdentInfo || declIdentInfo->type!=IdentifierInfo::AUTO){
                     SEMANTIC_ERROR("Cannot take the address of a parameter or register variable");
                 }
             }

@@ -106,6 +106,178 @@ enum {
 
 #define EXIT_TODO EXIT_TODO_X("Not implemented yet.")
 
+namespace ArgParse{
+    struct Arg{
+        std::string shortOpt{""};
+        std::string longOpt{""};
+        uint32_t pos{0}; //if 0, no positional arg
+        std::string description{""};
+        bool required{false};
+        bool flag{false};
+
+
+        //define < operator, necessary for map
+        bool operator<(const Arg& other) const{
+            return shortOpt < other.shortOpt;
+        }
+
+        // returns whether the arg has a value/has been set
+        bool operator()() const;
+
+        // returns the args value
+        std::string& operator*() const;
+    };
+
+    std::map<Arg, std::string> parsedArgs{};
+    
+    // struct for all possible arguments
+    const struct {
+        const Arg help{      "h", "help"      , 0, "Show this help message and exit"                                                                     , false, true};
+        const Arg input{     "i", "input"     , 1, "Input file"                                                                                          ,  true, false};
+        const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)"           , false, true};
+        const Arg output{    "o", "output"    , 2, "Output file for AST (requires -p)"                                                                   , false, false};
+        const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
+        const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
+        const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
+        const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
+        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o.\n"
+                                                   "Disables the rest of the compilation process"                                                        , false, true};
+        const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
+        const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
+        const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
+        const Arg asmout{    "a", "asm"       , 0, "Output (ARM-) assembly"                                                                              , false, true};
+
+
+        const Arg sentinel{"", "", 0, "", false, false};
+
+        const Arg* const all[13] = {&help, &input, &dot, &output, &preprocess, &url, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
+        
+        // iterator over all
+        const Arg* begin() const{
+            return all[0];
+        }
+
+        const Arg* end() const{
+            return all[12];
+        }
+    } args;
+
+    bool Arg::operator()() const{
+        return parsedArgs.contains(*this);
+    }
+
+    std::string& Arg::operator*() const{
+        return parsedArgs[*this];
+    }
+
+    void printHelp(const char* argv0){
+        std::cerr << "A Compiler for a B like language" << std::endl;
+        std::cerr << "Usage: " << std::endl;
+        for(auto& arg:args){
+            std::cerr << "  ";
+            if(arg.shortOpt != ""){
+                std::cerr << "-" << arg.shortOpt;
+            }
+            if(arg.longOpt != ""){
+                if(arg.shortOpt != ""){
+                    std::cerr << ", ";
+                }
+                std::cerr << "--" << arg.longOpt;
+            }
+            if(arg.pos != 0){
+                std::cerr << " (or positional, at position " << arg.pos << ")";
+            }else if(arg.flag){
+                std::cerr << " (flag)";
+            }
+            std::cerr << std::endl;
+            std::cerr << "    " << arg.description << std::endl; // TODO string replace all \n with \n \t here
+        }
+
+        std::cerr << 
+        "\nExamples: \n"
+        << "  " << argv0 << " -i input.b -p -d -o output.dot\n"
+        << "  " << argv0 << " input.b -pd output.dot\n"
+        << "  " << argv0 << " input.b -pdu\n"
+        << "  " << argv0 << " -lE input.b\n"
+        << "  " << argv0 << " -l main.b main\n"
+        << "  " << argv0 << " -ls input.b\n"
+        << "  " << argv0 << " -sr input.b\n"
+        << "  " << argv0 << " -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there\n";
+    }
+
+    //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
+    std::map<Arg, std::string>& parse(int argc, char *argv[]){
+        std::stringstream ss;
+        ss << " ";
+        for (int i = 1; i < argc; ++i) {
+            ss << argv[i] << " ";
+        }
+
+        string argString = ss.str();
+
+
+        //handle positional args first, they have lower precedence
+        //find them all, put them into a vector, then match them to the possible args
+        std::vector<string> positionalArgs{};
+        for(int i = 1; i < argc; ++i){
+            for(const auto& arg : args){
+                if(!arg.flag && (("-"+arg.shortOpt) == string{argv[i-1]} || ("--"+arg.longOpt) == string{argv[i-1]})){
+                    //the current arg is the value to another argument, so we dont count it
+                    goto cont;
+                }
+            }
+
+
+            if(argv[i][0] != '-'){
+                // now we know its a positional arg
+                positionalArgs.emplace_back(argv[i]);
+            }
+cont:
+            continue;
+        }
+
+        for(const auto& arg : args){
+            if(arg.pos != 0){
+                //this is a positional arg
+                if(positionalArgs.size() > arg.pos-1){
+                    parsedArgs[arg] = positionalArgs[arg.pos-1];
+                }
+            }
+        }
+
+        bool missingRequired = false;
+
+        //long/short/flags
+        for(const auto& arg : args){
+            if(!arg.flag){
+                std::regex matchShort{" -"+arg.shortOpt+"\\s*([^\\s]+)"};
+                std::regex matchLong{" --"+arg.longOpt+"(\\s*|=)([^\\s=]+)"};
+                std::smatch match;
+                if(arg.shortOpt!="" && std::regex_search(argString, match, matchShort)){
+                    parsedArgs[arg] = match[1];
+                }else if(arg.longOpt!="" && std::regex_search(argString, match, matchLong)){
+                    parsedArgs[arg] = match[2];
+                }else if(arg.required && !parsedArgs.contains(arg)){
+                    std::cerr << "Missing required argument: -" << arg.shortOpt << "/--" << arg.longOpt << std::endl;
+                    missingRequired = true;
+                }
+            }else{
+                std::regex matchFlagShort{" -[a-zA-z]*"+arg.shortOpt};
+                std::regex matchFlagLong{" --"+arg.longOpt};
+                if(std::regex_search(argString, matchFlagShort) || std::regex_search(argString, matchFlagLong)){
+                    parsedArgs[arg] = ""; // empty string for flags, will just be checked using .contains
+                }
+            };
+        }
+
+        if(missingRequired){
+            printHelp(argv[0]);
+            exit(ExitCode::ERROR);
+        }
+        return parsedArgs;
+    }
+
+} // end namespace ArgParse
 
 struct Token{
 public:
@@ -489,10 +661,11 @@ struct IdentifierInfo{
 
     static string toString(Type t){
         switch(t){
-            case UNKNOWN:   return "unknown";
             case REGISTER:  return "register";
             case AUTO:      return "auto";
             case FUNCTION:  return "function";
+            case UNKNOWN:
+            default:        return "unknown";
         }
     }
 
@@ -550,6 +723,8 @@ public:
     ASTNode(Type type, int64_t value) : type(type), value(value) {}
 
     ASTNode(Type type, Token::Type op) : type(type), op(op) {}
+
+    ASTNode(Type type, std::initializer_list<ASTNode> children) : type(type), children(children) {}
 
     string uniqueDotIdentifier() const {
         return nodeTypeToDotIdentifier.at(type) + "_" + std::to_string(nodeID);
@@ -726,6 +901,8 @@ using UnexpectedTokenException = Tokenizer::UnexpectedTokenException;
 
 class Parser{
 
+    Tokenizer tok;
+
 public:
     bool failed{false};
 
@@ -734,28 +911,28 @@ public:
     Parser(std::ifstream& inputFile) : tok{inputFile} {}
     // only called in case there is a return at the start of a statement -> throws exception if it fails
     ASTNode parseStmtDecl(){
-        if(tok.matchToken(Token::Type::KW_REGISTER) || tok.matchToken(Token::Type::KW_AUTO)){
-            auto registerOrAuto = tok.matched.type;
+        assert((tok.matched.type == Token::Type::KW_AUTO || tok.matched.type == Token::Type::KW_REGISTER) && "parseStmtDecl called on non-declaration token");
 
-            tok.assertToken(Token::Type::IDENTIFIER);
-            auto varName = tok.matched.value;
+        auto registerOrAuto = tok.matched.type;
 
-            tok.assertToken(Token::Type::ASSIGN);
+        tok.assertToken(Token::Type::IDENTIFIER);
+        auto varName = tok.matched.value;
 
-            auto initializer = parseExpr();
+        tok.assertToken(Token::Type::ASSIGN);
 
-            //if this returns normally, it means we have a valid initializer
-            tok.assertToken(Token::Type::SEMICOLON);
-            auto decl = ASTNode(ASTNode::Type::NStmtDecl, varName, registerOrAuto);
+        //if this returns normally, it means we have a valid initializer
+        auto initializer = parseExpr();
 
-            decl.children.push_back(std::move(initializer));
-            return decl;
-        }
-        throw UnexpectedTokenException(tok);
+        tok.assertToken(Token::Type::SEMICOLON);
+        auto decl = ASTNode(ASTNode::Type::NStmtDecl, varName, registerOrAuto);
+
+        decl.children.emplace_back(std::move(initializer));
+        return decl;
     }
 
     ASTNode parseStmtReturn(){
-        tok.assertToken(Token::Type::KW_RETURN);
+        assert(tok.matched.type == Token::Type::KW_RETURN && "parseStmtReturn called on non-return token");
+
         auto returnStmt= ASTNode(ASTNode::Type::NStmtReturn);
         if(tok.matchToken(Token::Type::SEMICOLON)){
             return returnStmt;
@@ -764,11 +941,11 @@ public:
             tok.assertToken(Token::Type::SEMICOLON);
             return returnStmt;
         }
-        throw UnexpectedTokenException(tok);
     }
 
     ASTNode parseBlock(){
-        tok.assertToken(Token::Type::L_BRACE);
+        assert(tok.matched.type == Token::Type::L_BRACE && "parseBlock called on non-block token");
+
         auto block = ASTNode(ASTNode::Type::NStmtBlock);
         while(!tok.matchToken(Token::Type::R_BRACE)){
             try{
@@ -789,34 +966,33 @@ public:
     }
 
     ASTNode parseStmtIfWhile(bool isWhile){
-        if((isWhile && tok.matchToken(Token::Type::KW_WHILE)) || (!isWhile && tok.matchToken(Token::Type::KW_IF))){
-            tok.assertToken(Token::Type::L_PAREN);
+        assert(((isWhile && tok.matched.type == Token::Type::KW_WHILE) || (!isWhile && tok.matched.type == Token::Type::KW_IF)) && "parseStmtIfWhile called on non-if/while token");
 
-            auto condition = parseExpr();
+        tok.assertToken(Token::Type::L_PAREN);
 
-            tok.assertToken(Token::Type::R_PAREN);
+        auto condition = parseExpr();
 
-            auto body = parseStmt();
-            auto ifWhileStmt = ASTNode(isWhile ? ASTNode::Type::NStmtWhile : ASTNode::Type::NStmtIf);
-            ifWhileStmt.children.push_back(std::move(condition));
-            ifWhileStmt.children.push_back(std::move(body));
+        tok.assertToken(Token::Type::R_PAREN);
 
-            if(!isWhile && tok.matchToken(Token::Type::KW_ELSE)){
-                ifWhileStmt.children.push_back(parseStmt());
-            }
-            return ifWhileStmt;
+        auto body = parseStmt();
+        auto ifWhileStmt = ASTNode(isWhile ? ASTNode::Type::NStmtWhile : ASTNode::Type::NStmtIf);
+        ifWhileStmt.children.push_back(std::move(condition));
+        ifWhileStmt.children.push_back(std::move(body));
+
+        if(!isWhile && tok.matchToken(Token::Type::KW_ELSE)){
+            ifWhileStmt.children.emplace_back(parseStmt());
         }
-        throw UnexpectedTokenException(tok);
+        return ifWhileStmt;
     }
 
     ASTNode parseStmt(){
-        if(tok.matchToken(Token::Type::KW_RETURN, false)){
+        if(tok.matchToken(Token::Type::KW_RETURN)){
             return parseStmtReturn();
-        }else if(tok.matchToken(Token::Type::KW_IF, false) || tok.matchToken(Token::Type::KW_WHILE, false)){
+        }else if(tok.matchToken(Token::Type::KW_IF) || tok.matchToken(Token::Type::KW_WHILE)){
             return parseStmtIfWhile(tok.matched.type == Token::Type::KW_WHILE);
-        }else if(tok.matchToken(Token::Type::KW_REGISTER, false) || tok.matchToken(Token::Type::KW_AUTO, false)){
+        }else if(tok.matchToken(Token::Type::KW_REGISTER) || tok.matchToken(Token::Type::KW_AUTO)){
             return parseStmtDecl();
-        }else if(tok.matchToken(Token::Type::L_BRACE, false)){
+        }else if(tok.matchToken(Token::Type::L_BRACE)){
             return parseBlock();
         }else{
             auto expr = parseExpr();
@@ -877,6 +1053,41 @@ public:
         throw UnexpectedTokenException(tok);
     }
 
+    inline ASTNode parseSubscript(ASTNode&& lhs){
+        auto expr = parseExpr();
+        std::optional<ASTNode> numOpt; // so this can be declared without being initialized
+        if(tok.matchToken(Token::Type::AT)){
+            // has to be followed by number
+            tok.assertToken(Token::Type::NUM, false);
+
+            // parse sizespec as number, validate it's 1/2/4/8
+            numOpt = parsePrimaryExpression();
+            auto& num = numOpt.value();
+            if(
+                    !(
+                        num.value==1 ||
+                        num.value==2 ||
+                        num.value==4 ||
+                        num.value==8
+                     )
+              ){
+                throw ParsingException("Line " +std::to_string(tok.getLineNum())+": Expression containing " + expr.toString() + " was followed by @, but @ wasn't followed by 1/2/4/8");
+            }
+        }else{
+            numOpt = ASTNode(ASTNode::Type::NExprNum);
+            auto& num = numOpt.value();
+            num.value = 8; //8 by default
+        }
+
+        tok.assertToken(Token::Type::R_BRACKET);
+
+        auto subscript = ASTNode(ASTNode::Type::NExprSubscript, {
+        std::move(lhs),
+        std::move(expr),
+        std::move(numOpt.value())});
+        return subscript;
+    }
+
     //adapted from the lecture slides
     ASTNode parseExpr(int minPrec = 0){
         ASTNode lhs = parsePrimaryExpression();
@@ -896,38 +1107,8 @@ public:
             }
             // special handling for [
             if(tok.matchToken(Token::Type::L_BRACKET)){
-                auto expr = parseExpr();
-                std::optional<ASTNode> numOpt; // so this can be declared without being initialized
-                if(tok.matchToken(Token::Type::AT)){
-                    // has to be followed by number
-                    tok.assertToken(Token::Type::NUM, false);
-
-                    // parse sizespec as number, validate it's 1/2/4/8
-                    numOpt = parsePrimaryExpression();
-                    auto& num = numOpt.value();
-                    if(
-                        !(
-                            num.value==1 ||
-                            num.value==2 ||
-                            num.value==4 ||
-                            num.value==8
-                         )
-                    ){
-                        throw ParsingException("Line " +std::to_string(tok.getLineNum())+": Expression containing " + expr.toString() + " was followed by @, but @ wasn't followed by 1/2/4/8");
-                    }
-                }else{
-                    numOpt = ASTNode(ASTNode::Type::NExprNum);
-                    auto& num = numOpt.value();
-                    num.value = 8; //8 by default
-                }
-
-                tok.assertToken(Token::Type::R_BRACKET);
-
-                auto subscript = ASTNode(ASTNode::Type::NExprSubscript);
-                subscript.children.emplace_back(std::move(lhs));
-                subscript.children.emplace_back(std::move(expr));
-                subscript.children.emplace_back(std::move(numOpt.value()));
-
+                // i hope this var def gets 'inlined'
+                auto subscript = parseSubscript(std::move(lhs));
                 lhs = std::move(subscript);
                 continue; // continue at the next level up
             }
@@ -975,7 +1156,8 @@ public:
                         throw e;
                     }
                 }
-                // at this point either an R_PAREN or syntax error is guaranteed
+                // at this point either a consumed R_PAREN or syntax error is guaranteed
+                tok.assertToken(Token::Type::L_BRACE);
                 auto body = parseBlock();
                 auto func = ASTNode(ASTNode::Type::NFunction, name);
                 func.children.push_back(std::move(paramlist));
@@ -1001,9 +1183,6 @@ public:
         tok.reset();
     }
 
-    
-private:
-    Tokenizer tok;
 };
 
 namespace SemanticAnalysis{
@@ -1051,7 +1230,7 @@ namespace SemanticAnalysis{
         void declareVariable(IdentifierInfo* info){
             static uint64_t nextVarUID = 1; // start at 1 so that 0 is invalid/not set yet
 
-            assert(info->uID == 0 && "Variable which should be declared in the current scope already has a UID");
+            assert((ArgParse::args.iterations() || info->uID == 0) && "Variable which should be declared in the current scope already has a UID");
 
             // we have to create a new UID for this variable
             info->uID = nextVarUID++;
@@ -1157,8 +1336,6 @@ namespace SemanticAnalysis{
                     if(pairIt->second !=  static_cast<int>(node.children.size())){
                         // we seem to have ourselves a vararg function we don't know anything about, so indicate that by setting the number of params to -1
                         pairIt->second = EXTERNAL_FUNCTION_VARARGS;
-                        // TODO does this even work?
-                        assert(externalFunctionsToNumParams[node.ident.name] == EXTERNAL_FUNCTION_VARARGS && "didnt work, go back");
                     }
                 }else{
                     externalFunctionsToNumParams[node.ident.name] = node.children.size();
@@ -1206,184 +1383,11 @@ namespace SemanticAnalysis{
         failed = false;
         declaredFunctions.clear();
         externalFunctionsToNumParams.clear();
+        scopes.reset();
     }
 
 } // end namespace SemanticAnalysis
 
-// comment out rest temporarily
-
-namespace ArgParse{
-    struct Arg{
-        std::string shortOpt{""};
-        std::string longOpt{""};
-        uint32_t pos{0}; //if 0, no positional arg
-        std::string description{""};
-        bool required{false};
-        bool flag{false};
-
-
-        //define < operator, necessary for map
-        bool operator<(const Arg& other) const{
-            return shortOpt < other.shortOpt;
-        }
-
-        // returns whether the arg has a value/has been set
-        bool operator()() const;
-
-        // returns the args value
-        std::string& operator*() const;
-    };
-
-    std::map<Arg, std::string> parsedArgs{};
-    
-    // struct for all possible arguments
-    const struct {
-        const Arg help{      "h", "help"      , 0, "Show this help message and exit"                                                                     , false, true};
-        const Arg input{     "i", "input"     , 1, "Input file"                                                                                          ,  true, false};
-        const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)"           , false, true};
-        const Arg output{    "o", "output"    , 2, "Output file for AST (requires -p)"                                                                   , false, false};
-        const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
-        const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
-        const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
-        const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
-        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o.\n"
-                                                   "Disables the rest of the compilation process"                                                        , false, true};
-        const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
-        const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
-        const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
-        const Arg asmout{    "a", "asm"       , 0, "Output (ARM-) assembly"                                                                              , false, true};
-
-
-        const Arg sentinel{"", "", 0, "", false, false};
-
-        const Arg* const all[13] = {&help, &input, &dot, &output, &preprocess, &url, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
-        
-        // iterator over all
-        const Arg* begin() const{
-            return all[0];
-        }
-
-        const Arg* end() const{
-            return all[12];
-        }
-    } args;
-
-    bool Arg::operator()() const{
-        return parsedArgs.contains(*this);
-    }
-
-    std::string& Arg::operator*() const{
-        return parsedArgs[*this];
-    }
-
-    void printHelp(const char* argv0){
-        std::cerr << "A Compiler for a B like language" << std::endl;
-        std::cerr << "Usage: " << std::endl;
-        for(auto& arg:args){
-            std::cerr << "  ";
-            if(arg.shortOpt != ""){
-                std::cerr << "-" << arg.shortOpt;
-            }
-            if(arg.longOpt != ""){
-                if(arg.shortOpt != ""){
-                    std::cerr << ", ";
-                }
-                std::cerr << "--" << arg.longOpt;
-            }
-            if(arg.pos != 0){
-                std::cerr << " (or positional, at position " << arg.pos << ")";
-            }else if(arg.flag){
-                std::cerr << " (flag)";
-            }
-            std::cerr << std::endl;
-            std::cerr << "    " << arg.description << std::endl; // TODO string replace all \n with \n \t here
-        }
-
-        std::cerr << 
-        "\nExamples: \n"
-        << "  " << argv0 << " -i input.b -p -d -o output.dot\n"
-        << "  " << argv0 << " input.b -pd output.dot\n"
-        << "  " << argv0 << " input.b -pdu\n"
-        << "  " << argv0 << " -lE input.b\n"
-        << "  " << argv0 << " -l main.b main\n"
-        << "  " << argv0 << " -ls input.b\n"
-        << "  " << argv0 << " -sr input.b\n"
-        << "  " << argv0 << " -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there\n";
-    }
-
-    //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
-    std::map<Arg, std::string>& parse(int argc, char *argv[]){
-        std::stringstream ss;
-        ss << " ";
-        for (int i = 1; i < argc; ++i) {
-            ss << argv[i] << " ";
-        }
-
-        string argString = ss.str();
-
-
-        //handle positional args first, they have lower precedence
-        //find them all, put them into a vector, then match them to the possible args
-        std::vector<string> positionalArgs{};
-        for(int i = 1; i < argc; ++i){
-            for(const auto& arg : args){
-                if(!arg.flag && (("-"+arg.shortOpt) == string{argv[i-1]} || ("--"+arg.longOpt) == string{argv[i-1]})){
-                    //the current arg is the value to another argument, so we dont count it
-                    goto cont;
-                }
-            }
-
-
-            if(argv[i][0] != '-'){
-                // now we know its a positional arg
-                positionalArgs.emplace_back(argv[i]);
-            }
-cont:
-            continue;
-        }
-
-        for(const auto& arg : args){
-            if(arg.pos != 0){
-                //this is a positional arg
-                if(positionalArgs.size() > arg.pos-1){
-                    parsedArgs[arg] = positionalArgs[arg.pos-1];
-                }
-            }
-        }
-
-        bool missingRequired = false;
-
-        //long/short/flags
-        for(const auto& arg : args){
-            if(!arg.flag){
-                std::regex matchShort{" -"+arg.shortOpt+"\\s*([^\\s]+)"};
-                std::regex matchLong{" --"+arg.longOpt+"(\\s*|=)([^\\s=]+)"};
-                std::smatch match;
-                if(arg.shortOpt!="" && std::regex_search(argString, match, matchShort)){
-                    parsedArgs[arg] = match[1];
-                }else if(arg.longOpt!="" && std::regex_search(argString, match, matchLong)){
-                    parsedArgs[arg] = match[2];
-                }else if(arg.required && !parsedArgs.contains(arg)){
-                    std::cerr << "Missing required argument: -" << arg.shortOpt << "/--" << arg.longOpt << std::endl;
-                    missingRequired = true;
-                }
-            }else{
-                std::regex matchFlagShort{" -[a-zA-z]*"+arg.shortOpt};
-                std::regex matchFlagLong{" --"+arg.longOpt};
-                if(std::regex_search(argString, matchFlagShort) || std::regex_search(argString, matchFlagLong)){
-                    parsedArgs[arg] = ""; // empty string for flags, will just be checked using .contains
-                }
-            };
-        }
-
-        if(missingRequired){
-            printHelp(argv[0]);
-            exit(ExitCode::ERROR);
-        }
-        return parsedArgs;
-    }
-
-} // end namespace ArgParse
 
 
 // taken from https://stackoverflow.com/a/17708801

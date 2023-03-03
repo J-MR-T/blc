@@ -1,4 +1,4 @@
-![https://github.com/J-MR-T/blc/actions/workflows/test.yml/badge.svg]
+![test-badge](https://github.com/J-MR-T/blc/actions/workflows/test.yml/badge.svg)
 
 # `blc`: A compiler for a [B](https://en.wikipedia.org/wiki/B_(programming_language))-like language
 

@@ -79,6 +79,7 @@ Additional specifications:
 - Variables declared with `register` and parameters are not permitted as operand of the address-of operator (unary `&`).
 - Variables are only accessible in their scope of declaration or enclosed blocks; parameters are accessible in the entire function.
 - Valid size specifiers for subscripts are 1, 2, 4, and 8; if omitted, it defaults to 8.
+- Function names must be unique.
 
 ## Semantics
 

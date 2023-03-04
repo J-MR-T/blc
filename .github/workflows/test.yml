@@ -3,6 +3,9 @@ name: Tests
 on:
   workflow_dispatch:
   push:
+    paths:
+    - "**/*.cpp"
+    - ".github/**/*.yml"
   pull_request:
 
 # This allows a subsequently queued workflow run to interrupt previous runs

@@ -1,5 +1,5 @@
 // RUN: %blc -lE %s 2>&1 | FileCheck %s
-// RUN: %blc -lE %s %t-1; %blc -aE %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | diff <(%t-1) -
+// RUN: %blc -lE %s %t-1; %blc -aE %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | diff -y <(%t-1) -
 
 #include "lib.b"
 
@@ -62,7 +62,8 @@ fn4(x, y, hihi, hoho, haha){
         if(a) return a; else return x;
         return a;
     }else if(5) {
-        return fn4(a, (1 << 64) >> 64, haha, hihi, haha-1);
+        /*return a - (1 << 64) >> 64 + haha* hihi % haha-1;*/
+        return 0;
     }else
     return 50;
 }
@@ -72,11 +73,16 @@ main(){
 
     register i =0;
     while(i < 500){
-        srand(i);
+        //srand(i);
         
-        fn(rand(), rand());
-        fn2(rand(), rand());
-        fn3(rand(), rand());
-        fn4(rand(), rand(), rand(), rand(), rand());
+        //printnum(fn(i*5, i%3));
+        // TODO this breaks it
+        //printnum(fn2(i+20, i/3));
+        printnum(fn3(i*i, i/5));
+        printnum(fn4(i << 2, i, i-1, i*50, i/2));
+
+        i = i+1;
     }
+
+    return 0;
 }

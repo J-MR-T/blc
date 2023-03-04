@@ -1425,12 +1425,11 @@ namespace Codegen{
     llvm::Type* voidTy = llvm::Type::getVoidTy(ctx);
     llvm::Function* currentFunction = nullptr;
 
-    void warn(const std::string& msg, llvm::Instruction* instr = nullptr){
+    void warn(const std::string& msg, llvm::Value* value = nullptr){
         if(!ArgParse::args.nowarn()){
             llvm::errs() << "Warning: " << msg;
-            if(instr != nullptr){
-                llvm::errs() << " at " << *instr;
-            }
+            if(value)
+                llvm::errs() << " at " << *value;
             llvm::errs() << "\n";
             warningsGenerated = true;
         }
@@ -3808,6 +3807,7 @@ namespace Codegen{
             // - constants (XZR)
             // - CallInsts -> have registers
             // - parameters -> have registers
+            // - poison -> warn about it
 
             if(v == XZR){
                 out << regPrefix<bitwidth> << "ZR";
@@ -3815,16 +3815,19 @@ namespace Codegen{
                 out << constInt->getZExtValue();
             }else if(auto param = llvm::dyn_cast<llvm::Argument>(v)){
                 out << regPrefix<bitwidth> << RegAlloc::llvmGetRegisterForArgument(param);
-            }else{
+            }else if(auto call = llvm::dyn_cast<llvm::CallInst>(v)){
                 // TODO problem: this is called with allocas as args, we have to translate those to fp-relative addresses, and materialize them
                 // all of the others are handled in ptrtoint, but this cannot be done for phi nodes, as they use the ptr directly and store it somewhere (in the ARM_PSEUDO_str)
-                // the alternative would be to not do phis for ptrs
+                // the alternative would be to not do phis for ptrs (which should hopefully have happend by now, but check this again)
                 // TODO factor out this code to a helper "assert is type" or smth
-                bool isCall = llvm::isa<llvm::CallInst>(v);
-                (void) isCall;
-                if(!isCall) {DEBUGLOG("not a call: " << *v)}
-                assert(isCall && "emitReg called with neither XZR, nor function parameter, nor call");
-                emitReg<bitwidth>(llvm::dyn_cast_if_present<llvm::CallInst>(v));
+                emitReg<bitwidth>(call);
+            }else if(auto poison = llvm::dyn_cast<llvm::PoisonValue>(v)){
+                // this means there is undefined behavior somewhere in the codegen, for example a division by 0, shift by >=64 etc.
+                warn("poison value encountered, substituting zero. This means there is undefined behavior in the source, please check for any divisions by zero, shifts by >=64, etc.", poison);
+                out << regPrefix<bitwidth> << "ZR";
+            }else{
+                DEBUGLOG("v: " << *v);
+                assert(false && "unhandled value type");
             }
         }
 

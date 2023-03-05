@@ -1467,18 +1467,12 @@ namespace Codegen{
     string llvmPredicateToARM(llvm::ICmpInst::Predicate pred){
         switch(pred){
             // we only use 6 of these:
-            case llvm::CmpInst::ICMP_EQ:
-                return "eq";
-            case llvm::CmpInst::ICMP_NE:
-                return "ne";
-            case llvm::CmpInst::ICMP_SGT:
-                return "gt";
-            case llvm::CmpInst::ICMP_SGE:
-                return "ge";
-            case llvm::CmpInst::ICMP_SLT:
-                return "lt";
-            case llvm::CmpInst::ICMP_SLE:
-                return "le";
+            case llvm::CmpInst::ICMP_EQ:  return "eq";
+            case llvm::CmpInst::ICMP_NE:  return "ne";
+            case llvm::CmpInst::ICMP_SGT: return "gt";
+            case llvm::CmpInst::ICMP_SGE: return "ge";
+            case llvm::CmpInst::ICMP_SLT: return "lt";
+            case llvm::CmpInst::ICMP_SLE: return "le";
             default:
                 assert(false && "Invalid predicate");
                 return "";

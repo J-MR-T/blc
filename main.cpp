@@ -43,6 +43,7 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/IR/Dominators.h>
+#include <llvm/Analysis/CFG.h>
 
 // stuff I assume i need for writing object files...
 #include <llvm/IR/LegacyPassManager.h>
@@ -2046,6 +2047,11 @@ namespace Codegen{
             // I tried to find it in the C standard, but I couldn't find any defined behavior about functions with return types not returning, undefined behavior galore
             // clang simply inserts an unreachable here (even though it is totally reachable, we have in fact proven at this point, that if its empty, it has at least has >0 uses, and otherwise it should always have uses), so that's what we'll do too
             irb.CreateUnreachable();
+        }
+
+        // if unreachable is reachable -> warn
+        if(llvm::isPotentiallyReachable(entryBB, insertBlock) && llvm::isa<llvm::UnreachableInst>(insertBlock->getTerminator())){
+            warn("Function " + fn->getName().str() + " does not seem to be guaranteed to return a value, this is undefined behvaior.");
         }
     }
 

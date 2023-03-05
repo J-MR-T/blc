@@ -4144,11 +4144,13 @@ namespace Codegen{
                         }
                         out << "\tadd sp, fp, " << stackAllocation <<"\n"; // deallocate stackframe (fp+stackAllocation gets back to old fp)
                         out << "\tldp fp, lr, [sp], 16\n";
-                        // TODO save restore cfi here
+
+                        out << "\t.cfi_remember_state\n";
                         out << "\t.cfi_restore 30\n";
                         out << "\t.cfi_restore 29\n";
                         out << "\t.cfi_def_cfa sp, 0\n";
                         out << "\tret\n";
+                        out << "\t.cfi_restore_state\n";
 
                     }else if(llvm::isa<llvm::BranchInst>(&inst) || llvm::isa<llvm::AllocaInst>(&inst) || llvm::isa<llvm::UnreachableInst>(&inst)){
                         // branches are simply ignored, they are explicitly converted to branch arm instructions in ISel

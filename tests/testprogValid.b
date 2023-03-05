@@ -1,6 +1,5 @@
 // RUN: %blc -l %s 2>&1 | FileCheck %s
 
-// CHECK: 0
 //hello
 gauss(x) {
     register res = -0;
@@ -18,8 +17,10 @@ reallyComplexExpr(x,y,z){
 //me is comment
 ifTest(x) {
     if (x < -5)
+        // CHECK: Warning{{.*}}nothing
         return;//  me evil
     x = x + 3;
+    // CHECK: Warning{{.*}}not{{.*}}guaranteed{{.*}}return
 }//hihi
 //muhahah
 
@@ -32,6 +33,7 @@ callTest(a, b) {
     register c = foo(a, b);
     a = &a[a@4]; // okay
     return bar(c, a) + baf(a) + baz(c);
+    // CHECK: Warning{{.*}}arguments{{.*}}parameters
 }
 
 baz(a, b) { return; }

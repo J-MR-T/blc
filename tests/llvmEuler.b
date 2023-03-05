@@ -1,4 +1,5 @@
 // RUN: cc %S/euler.c -o %t-euler && %blc -l %s %t && %t | diff - <(%t-euler)
+// RUN: %blc %s 2>&1 | not grep Warn
 
 // from https://en.wikipedia.org/wiki/B_(programming_language)
 

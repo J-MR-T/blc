@@ -24,6 +24,7 @@ fn2(x, y){
     }else{
         retval = fn3(a, y);
     }
+    return retval;
 }
 
 fn3(x, y){
@@ -62,10 +63,13 @@ fn4(x, y, hihi, hoho, haha){
         if(a) return a; else return x;
         return a;
     }else if(5) {
-        /*return a - (1 << 64) >> 64 + haha* hihi % haha-1;*/
+        // TODO this currently still fails:
+        /*return a - (1 << 63) >> 64 + haha* hihi % haha-1;*/
         return 0;
     }else
     return 50;
+
+    return 0;
 }
 
 main(){
@@ -75,9 +79,8 @@ main(){
     while(i < 500){
         //srand(i);
         
-        //printnum(fn(i*5, i%3));
-        // TODO this breaks it
-        //printnum(fn2(i+20, i/3));
+        printnum(fn(i*5, i%3));
+        printnum(fn2(i+20, i/3));
         printnum(fn3(i*i, i/5));
         printnum(fn4(i << 2, i, i-1, i*50, i/2));
 

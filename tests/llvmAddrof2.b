@@ -1,4 +1,5 @@
 // RUN: %blc -l %s 2>&1 | FileCheck %s
+// RUN: %blc %s 2>&1 | not grep Warn
 
 // CHECK-NOT: poison
 addrof(ptr) {

@@ -1,4 +1,5 @@
 // RUN: %blc -l %s %t && %t | FileCheck %s
+// RUN: %blc %s 2>&1 | not grep Warn
 
 println(){
     register fmt = calloc(2,1);

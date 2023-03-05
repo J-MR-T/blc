@@ -1,4 +1,4 @@
-// RUN: %blc -l %s 2>&1
+// RUN: %blc -l %s 2>&1 | not grep Warn
 
 /// only prints a newline
 println(){

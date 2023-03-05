@@ -1884,10 +1884,7 @@ namespace Codegen{
                 }
                 break;
             case ASTNode::Type::NStmtReturn:
-                // technically returning "nothing" is undefined behavior, so we can just return 0 in that case
                 if(stmtNode.children.size() == 0){
-                    //irb.CreateRet(irb.getInt64(0));
-                    // actually I think returning poison/undef is better, and warning about it
                     auto retrn = irb.CreateRet(llvm::PoisonValue::get(i64));
                     warn("Returning nothing is undefined behavior", retrn);
                 }else{
@@ -2047,10 +2044,6 @@ namespace Codegen{
             // I tried to find it in the C standard, but I couldn't find any defined behavior about functions with return types not returning, undefined behavior galore
             // clang simply inserts an unreachable here (even though it is totally reachable, we have in fact proven at this point, that if its empty, it has at least has >0 uses, and otherwise it should always have uses), so that's what we'll do too
             irb.CreateUnreachable();
-        }
-
-        // if unreachable is reachable -> warn
-        if(llvm::isPotentiallyReachable(entryBB, insertBlock) && llvm::isa<llvm::UnreachableInst>(insertBlock->getTerminator())){
             warn("Function " + fn->getName().str() + " does not seem to be guaranteed to return a value, this is undefined behvaior.");
         }
     }

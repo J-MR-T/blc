@@ -78,7 +78,7 @@
 using std::string;
 using std::string_view;
 using std::unique_ptr;
-using std::literals::string_literals::operator""s;
+using namespace std::literals::string_literals;
 
 #ifndef NDEBUG
 #define DEBUGLOG(x) llvm::errs() << x << "\n"; fflush(stderr);
@@ -1426,6 +1426,20 @@ namespace Codegen{
     llvm::Type* voidTy = llvm::Type::getVoidTy(ctx);
     llvm::Function* currentFunction = nullptr;
 
+    template<typename T>
+    concept printable = requires(T t){
+        llvm::outs() << t;
+        llvm::errs() << t;
+    };
+
+    void warn(printable auto... args){
+        if(!ArgParse::args.nowarn()){
+            llvm::errs() << "Warning: ";
+            (llvm::errs() << ... << args) << "\n";
+            warningsGenerated = true;
+        }
+    }
+
     void warn(const std::string& msg, llvm::Value* value = nullptr){
         if(!ArgParse::args.nowarn()){
             llvm::errs() << "Warning: " << msg;
@@ -1636,10 +1650,7 @@ namespace Codegen{
                             return irb.CreateCall(&*callee, args);
                         }else{
                             // otherwise, there is something weird going on
-                            std::stringstream ss{};
-                            ss << "Call to function " << exprNode.ident.name << " with " << args.size() << " arguments, but function has " << callee->arg_size() << " parameters";
-                            DEBUGLOG(ss.str());
-                            warn(ss.str());
+                            warn("Call to function ", exprNode.ident.name, " with ", args.size(), " arguments, but function has ", callee->arg_size(), " parameters");
                             return llvm::PoisonValue::get(i64);
                         }
                     }else{

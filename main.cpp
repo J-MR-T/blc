@@ -27,6 +27,7 @@
 
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wcomment"
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Constants.h>
@@ -1065,13 +1066,13 @@ public:
             numOpt = parsePrimaryExpression();
             auto& num = numOpt.value();
             if(
-                    !(
-                        num.value==1 ||
-                        num.value==2 ||
-                        num.value==4 ||
-                        num.value==8
-                     )
-              ){
+                !(
+                    num.value==1 ||
+                    num.value==2 ||
+                    num.value==4 ||
+                    num.value==8
+                 )
+            ){
                 throw ParsingException("Line " +std::to_string(tok.getLineNum())+": Expression containing " + expr.toString() + " was followed by @, but @ wasn't followed by 1/2/4/8");
             }
         }else{
@@ -1153,9 +1154,9 @@ public:
                     while(!tok.matchToken(Token::Type::L_BRACE, false) && !tok.matchToken(Token::Type::EOP, false)){
                         tok.nextToken();
                     }
-                    if(tok.matched.type == Token::Type::EOP){
+                    if(tok.matched.type == Token::Type::EOP)
                         throw e;
-                    }
+                    
                 }
                 // at this point either a consumed R_PAREN or syntax error is guaranteed
                 tok.assertToken(Token::Type::L_BRACE);
@@ -2159,9 +2160,11 @@ namespace Codegen::ISel{
     public:
         static const Pattern emptyPattern;
 
-        const unsigned type{0};       // basically an enum member for type checks, will be initialized with llvm::Instruction::<type>
-                                      // find instruction types in include/llvm/IR/Instruction.def
-                                      // 0 means no type check with this requirement (but children/constants etc. still need to match)
+        /// basically an enum member for type checks, will be initialized with llvm::Instruction::<opcode>
+        /// find instruction opcodes in include/llvm/IR/Instruction.def
+        /// if there is no opcode, there is no opcode check performed with this requirement (but children/constants etc. still need to match)
+        const std::optional<unsigned> opcode{};
+
         const std::vector<Pattern> children{};
         const unsigned totalSize;
         const bool root{false};
@@ -2170,27 +2173,23 @@ namespace Codegen::ISel{
 
         struct PatternHash{
             std::size_t operator()(const Pattern& p) const{
-                std::size_t hash = 0;
-                hash ^= std::hash<unsigned>{}(p.type);
-                hash ^= std::hash<bool>{}(p.root);
-                hash ^= std::hash<bool>{}(p.constant);
-                for(auto& child:p.children){
-                    hash ^= PatternHash{}(child);
-                }
+                std::size_t hash = llvm::hash_combine(p.opcode.value_or(0), p.root, p.constant, p.noDelete);
+                for(const auto& child : p.children)
+                    hash = llvm::hash_combine(hash, PatternHash{}(child));
+
                 return hash;
             }
         };
 
         // == operator for hashing
         bool operator==(const Pattern& other) const{
-            if(type != other.type || root != other.root || constant != other.constant || children.size() != other.children.size()){
+            if(opcode != other.opcode || root != other.root || constant != other.constant || noDelete != other.noDelete || children.size() != other.children.size())
                 return false;
-            }
-            for(unsigned int i = 0; i < children.size(); i++){
-                if(children[i] != other.children[i]){
+
+            for(unsigned int i = 0; i < children.size(); i++)
+                if(children[i] != other.children[i])
                     return false;
-                }
-            }
+
             return true;
         }
 
@@ -2212,7 +2211,7 @@ namespace Codegen::ISel{
             auto pushOps = [&](llvm::Instruction* instr, const Pattern* currentPattern){
                 // iterating over children means, that if they are empty, we ignore them, which is what we want
                 for(unsigned i = 0; i < currentPattern->children.size(); i++){
-                    if(currentPattern->children[i].type!=0 && !currentPattern->children[i].noDelete){
+                    if(currentPattern->children[i].opcode && !currentPattern->children[i].noDelete){
                         auto op = instr->getOperand(i);
                         auto opInstr = llvm::dyn_cast<llvm::Instruction>(op);
                         assert(opInstr != nullptr);
@@ -2246,12 +2245,12 @@ namespace Codegen::ISel{
 
         unsigned calcTotalSize(std::vector<Pattern> children) const noexcept {
             unsigned res = 1;
-            for(auto& child:children) if(child.type!=0 || child.constant) res+=child.totalSize;
+            for(auto& child:children) if(child.opcode || child.constant) res+=child.totalSize;
             return res;
         }
 
-        Pattern(unsigned isMatching, std::vector<Pattern> children, bool constant, bool root, bool noDelete) :
-            type(isMatching),
+        Pattern(std::optional<unsigned> isMatching, std::vector<Pattern> children, bool constant, bool root, bool noDelete) :
+            opcode(isMatching),
             children(children),
             totalSize(calcTotalSize(children)),
             root(root),
@@ -2260,8 +2259,8 @@ namespace Codegen::ISel{
             {}
 
     public:
-        Pattern(unsigned isMatching = 0, std::vector<Pattern> children = {}, bool noDelete = false) :
-            type(isMatching), children(children), totalSize(calcTotalSize(children)), noDelete(noDelete)
+        Pattern(std::optional<unsigned> isMatching = {}, std::vector<Pattern> children = {}, bool noDelete = false) :
+            opcode(isMatching), children(children), totalSize(calcTotalSize(children)), noDelete(noDelete)
             {}
 
         static const Pattern constantPattern;
@@ -2271,7 +2270,7 @@ namespace Codegen::ISel{
             return constantPattern;
         }
 
-        static Pattern make_root(llvm::Value* (*replacementCall)(llvm::IRBuilder<>&), unsigned isMatching = 0, std::vector<Pattern> children = {}, bool noDelete = false){
+        static Pattern make_root(llvm::Value* (*replacementCall)(llvm::IRBuilder<>&), std::optional<unsigned> isMatching = {}, std::vector<Pattern> children = {}, bool noDelete = false){
         //static Pattern make_root(std::function<llvm::Value*(llvm::IRBuilder<>&)> replacementCall, unsigned isMatching = 0, std::vector<Pattern> children = {}, std::initializer_list<Pattern> alternatives = {}){
             Pattern rootPattern{isMatching, children, false, true, noDelete};
             Pattern::replacementCalls[rootPattern] = replacementCall;
@@ -2281,41 +2280,37 @@ namespace Codegen::ISel{
         /**
          * The matching works thusly:
          * - if there are alternatives, to this pattern, the pattern matches iff any of the alternatives match
-         * - 0 as an instruction type does not check the type of the instruction, but other checks are still performed
-         * - if the instruction type is not 0, it must match the instruction type of the value, if the value is not an instruction, it does not match
+         * - if the instruction opcode exists, it must match the instruction opcode of the value, if the value is not an instruction, it does not match
          * - the number of children must match the number of operands to the instruction, except if there are 0 children, which indicates that the instruction has arbitrary operands
-         * - if the pattern (node) has a constant requirement, the value must be a constant and the constant must match
+         * - if the pattern (node) has a constant requirement, the value must be a constant
          * - if the pattern (node) is neither the root, nor a leaf, this value must only have one user (which is the instruction that we are trying to match), so it can be deleted without affecting other instructions
          * - all children patterns must also match their respective operands
          *
          * This basically boils down to tree matching with edge splitting on DAGs (any instruction except the root and those which are ignored, because they are empty require exactly one predecessor to match), with the DAG being the basic blocks of an llvm function
          */
         bool match(llvm::Value* val) const {
-            if(type!=0 && !root && val->hasNUsesOrMore(2)) return false; // this requirement is important for all 'real' inner nodes, i.e. all except the root and leaves
-                                                           // leaves should have type 0
+            if(opcode && !root && val->hasNUsesOrMore(2)) return false; // this requirement is important for all 'real' inner nodes, i.e. all except the root and leaves
+                                                           // leaves should have no opcode
 
-            // constant check
-            if(constant){
+            if(constant)
                 return llvm::isa_and_nonnull<llvm::ConstantInt>(val);
-            }
 
             auto inst = llvm::dyn_cast_or_null<llvm::Instruction>(val); // this also propagates nullptrs, and it just returns a null pointer if the cast failed, this saves us an isa<> check
-            if(type!=0 && 
-                 (inst==nullptr || inst->getOpcode() != type || (children.size() != 0 && children.size() != inst->getNumOperands()))){
+            if(opcode && 
+                 (inst==nullptr || inst->getOpcode() != opcode || (children.size() != 0 && children.size() != inst->getNumOperands()))){
                 return false;
             }
-            for(unsigned int i = 0; i < children.size(); i++){
-                if(!children[i].match(inst->getOperand(i))){
+            for(unsigned int i = 0; i < children.size(); i++)
+                if(!children[i].match(inst->getOperand(i)))
                     return false;
-                }
-            }
+            
             return true;
         }
     }; // struct Pattern
 
-    const Pattern Pattern::emptyPattern = Pattern{0,{}, false, false, true};;
+    const Pattern Pattern::emptyPattern = Pattern{{},{}, false, false, true};;
     std::unordered_map<Pattern, llvm::Value* (*)(llvm::IRBuilder<>&), Pattern::PatternHash> Pattern::replacementCalls{};
-    const Pattern Pattern::constantPattern = Pattern(0, {}, true, false, true);
+    const Pattern Pattern::constantPattern = Pattern({}, {}, true, false, true);
 
     std::unordered_set<unsigned> skippableTypes{
         llvm::Instruction::Ret,
@@ -2369,7 +2364,9 @@ namespace Codegen::ISel{
                             // add remaining operands to queue
                             // iterating over children means, that if they are empty, we ignore them, which is what we want
                             for(unsigned i = 0; i < currentPattern->children.size(); i++){
-                                if(currentPattern->children[i].type!=0){ // this also guarantees that this is not a constant
+                                if(currentPattern->children[i].opcode){ // this also guarantees that this is not a constant
+                                    assert(currentPattern->children[i].constant == false && "constant patterns shouldn't have a type");
+
                                     auto op = current->getOperand(i);
                                     auto opInstr = llvm::dyn_cast<llvm::Instruction>(op);
                                     coveredInsertionQueue.push(opInstr);
@@ -3054,7 +3051,7 @@ namespace Codegen::ISel{
                         {
                             llvm::Instruction::ZExt,
                             {
-                                llvm::Instruction::ICmp
+                                {llvm::Instruction::ICmp}
                             }
                         },
                         {}

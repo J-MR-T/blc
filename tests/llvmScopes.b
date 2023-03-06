@@ -185,6 +185,19 @@ fnI(fmt){
     return 0;
 }
 
+fnJ(x){
+    {
+        register a =0;
+        a = a+x;
+    }
+
+    {
+        register a =0;
+        x = a+x;
+    }
+    return 0;
+}
+
 main(){
     register fmt = getIntFmtString();
 

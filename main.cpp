@@ -1240,18 +1240,19 @@ namespace SemanticAnalysis{
             auto* decls = find(info->name);
             if(decls){
                 // forbid same scope shadowing
-                if(decls->back().nestingLevel == currentNestedLevel){
+                if(!decls->empty() && decls->back().nestingLevel == currentNestedLevel){
                     SEMANTIC_ERROR("Variable '" << info->name << "' already declared in this scope");
                     return;
                 }
                 decls->emplace_back(info, currentNestedLevel, passedBlocksPerNestingLevel[currentNestedLevel]);
             }else{
-                definitions.try_emplace(info->name, llvm::SmallVector<DeclarationEntry>(1, {info, currentNestedLevel, passedBlocksPerNestingLevel[currentNestedLevel]}));
+                auto worked = definitions.try_emplace(info->name, llvm::SmallVector<DeclarationEntry>(1, {info, currentNestedLevel, passedBlocksPerNestingLevel[currentNestedLevel]})).second;
+                assert(worked && "should always succeed in inserting new decl list in this case");
             }
         }
 
         IdentifierInfo* operator[](const string_view name){
-            if(auto* decls = find(name)){
+            if(auto* decls = find(name); decls && !decls->empty()){
                 return decls->back().info;
             }
 
@@ -1276,19 +1277,20 @@ namespace SemanticAnalysis{
 
             auto& decls = it->second;
             while(decls.size() > 0){
-                auto& [info, declaredNest, declaredBlockNum] = it->second.back();
+                auto& [info, declaredNest, declaredBlockNum] = decls.back();
                 if(declaredNest <= currentNestedLevel && declaredBlockNum == passedBlocksPerNestingLevel[declaredNest]){
                     /// we have to be sure that the declaration happend "above" the current block
                     /// and that it was declared in the same "parent/grandparent/great-grandparent/..." scope
 
                     // we found a declaration in the current scope, it's at the back of the vector we return
-                    return &it->second;
+                    return &decls;
                 }
                 // we found a declaration, but it was either not in a scope above, or in a scope that we have already passed, so it's unusable now, get rid of it
                 decls.pop_back();
             }
 
-            return nullptr;
+            // in this case, the list already exists, but we want to add to the now empty list
+            return &decls;
         }
 
     } scopes;

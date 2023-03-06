@@ -45,6 +45,7 @@ fn4(x, y, hihi, hoho, haha){
     if(haha == 0) return 0;
 
     if((((a = z*x || a)*a + (z && (a && a*a))*z) > y)){
+        PRINT_CUR_LINE()
         if(a+hihi) a = hihi; else a = hoho;
         if(y+hoho){
             if(y+haha){
@@ -63,8 +64,9 @@ fn4(x, y, hihi, hoho, haha){
         if(a) return a; else return x;
         return a;
     }else if(5) {
+        PRINT_CUR_LINE()
         // TODO this currently still fails:
-        /*return a - (1 << 63) >> 64 + haha* hihi % haha-1;*/
+        /*return x*x - (1 << 12) >> 13 + haha* hihi % haha-1;*/
         return 0;
     }else
     return 50;
@@ -76,7 +78,7 @@ main(){
     // try all kinds of different combinations of these functions
 
     register i =0;
-    while(i < 500){
+    while(i < 1){
         //srand(i);
         
         printnum(fn(i*5, i%3));

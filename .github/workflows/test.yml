@@ -41,8 +41,8 @@ jobs:
       with:
         version: "15.0.6"
         cached: ${{ steps.cache-llvm.outputs.cache-hit }}
-    - name: Test: Normal (Debug build)
+    - name: Test Debug build (normal)
       run: make test
-    - name: Test: Production build
+    - name: Test Production build
       run: make && lit -j1 -sv .
 

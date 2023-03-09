@@ -137,7 +137,7 @@ namespace ArgParse{
         const Arg help{      "h", "help"      , 0, "Show this help message and exit"                                                                     , false, true};
         const Arg input{     "i", "input"     , 1, "Input file"                                                                                          ,  true, false};
         const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)"           , false, true};
-        const Arg output{    "o", "output"    , 2, "Output file for AST (requires -p)"                                                                   , false, false};
+        const Arg output{    "o", "output"    , 2, "Output file"                                                                                         , false, false};
         const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
         const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
@@ -177,20 +177,21 @@ namespace ArgParse{
         std::cerr << "Usage: " << std::endl;
         for(auto& arg:args){
             std::cerr << "  ";
-            if(arg.shortOpt != ""){
+            if(arg.shortOpt != "")
                 std::cerr << "-" << arg.shortOpt;
-            }
+
             if(arg.longOpt != ""){
-                if(arg.shortOpt != ""){
+                if(arg.shortOpt != "")
                     std::cerr << ", ";
-                }
+
                 std::cerr << "--" << arg.longOpt;
             }
-            if(arg.pos != 0){
+
+            if(arg.pos != 0)
                 std::cerr << " (or positional, at position " << arg.pos << ")";
-            }else if(arg.flag){
+            else if(arg.flag)
                 std::cerr << " (flag)";
-            }
+
             std::cerr << "\n    "
             // string replace all \n with \n \t here
             << std::regex_replace(arg.description, std::regex("\n"), "\n    ")
@@ -199,14 +200,14 @@ namespace ArgParse{
 
         std::cerr << 
         "\nExamples: \n"
-        << "  " << argv0 << " -i input.b -p -d -o output.dot\n"
-        << "  " << argv0 << " input.b -pd output.dot\n"
-        << "  " << argv0 << " input.b -pdu\n"
+        << "  " << argv0 << " -i input.b -d -o output.dot\n"
+        << "  " << argv0 << " input.b -d output.dot\n"
+        << "  " << argv0 << " input.b -du\n"
         << "  " << argv0 << " -lE input.b\n"
         << "  " << argv0 << " -l main.b main\n"
         << "  " << argv0 << " -ls input.b\n"
         << "  " << argv0 << " -sr input.b\n"
-        << "  " << argv0 << " -a samples/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there\n";
+        << "  " << argv0 << " -a bSamples/asm/addressCalculations.b | aarch64-linux-gnu-gcc -g -x assembler -o test - && qemu-aarch64 -L /usr/aarch64-linux-gnu test hi\\ there\n";
     }
 
     //unordered_map doesnt work because of hash reasons (i think), so just define <, use ordered
@@ -2492,34 +2493,34 @@ namespace Codegen{
 
 
         // cmp
-        CREATE_INST_FN(ARM_cmp,      i64, i64, i64),
-        CREATE_INST_FN_VARARGS(ARM_csel,       i64), // condition is represented as string, so use varargs
-        CREATE_INST_FN_VARARGS(ARM_csel_i1,    llvm::Type::getInt1Ty(ctx)), // condition is represented as string, so use varargs
+        CREATE_INST_FN(ARM_cmp,     i64,                        i64, i64),
+        CREATE_INST_FN(ARM_csel,    i64,                        i64, i64),
+        CREATE_INST_FN(ARM_csel_i1, llvm::Type::getInt1Ty(ctx), i64, i64),
 
         // shifts by variable and immediate amount
-        CREATE_INST_FN(ARM_lsl_imm,  i64,  i64, i64),
-        CREATE_INST_FN(ARM_lsl_var,  i64,  i64, i64),
-        CREATE_INST_FN(ARM_asr_imm,  i64,  i64, i64),
-        CREATE_INST_FN(ARM_asr_var,  i64,  i64, i64),
+        CREATE_INST_FN(ARM_lsl_imm, i64, i64, i64),
+        CREATE_INST_FN(ARM_lsl_var, i64, i64, i64),
+        CREATE_INST_FN(ARM_asr_imm, i64, i64, i64),
+        CREATE_INST_FN(ARM_asr_var, i64, i64, i64),
 
         // bitwise
-        CREATE_INST_FN(ARM_and,      i64, i64, i64),
-        CREATE_INST_FN(ARM_orr,      i64, i64, i64),
-        CREATE_INST_FN(ARM_eor,      i64, i64, i64), // XOR
+        CREATE_INST_FN(ARM_and,     i64, i64, i64),
+        CREATE_INST_FN(ARM_orr,     i64, i64, i64),
+        CREATE_INST_FN(ARM_eor,     i64, i64, i64), // XOR
 
         // mov (varargs to accept both i64 and i1)
         CREATE_INST_FN_VARARGS(ARM_mov,       i64),
 
         // memory access
         // (with varargs to be able to simulate the different addressing modes)
-        CREATE_INST_FN_VARARGS(ARM_ldr,      i64),
-        CREATE_INST_FN_VARARGS(ARM_ldr_sb,   i64),
-        CREATE_INST_FN_VARARGS(ARM_ldr_sh,   i64),
-        CREATE_INST_FN_VARARGS(ARM_ldr_sw,   i64),
-        CREATE_INST_FN_VARARGS(ARM_str,      voidTy),
-        CREATE_INST_FN_VARARGS(ARM_str32,    voidTy),
-        CREATE_INST_FN_VARARGS(ARM_str32_b,  voidTy),
-        CREATE_INST_FN_VARARGS(ARM_str32_h,  voidTy),
+        CREATE_INST_FN_VARARGS(ARM_ldr,       i64),
+        CREATE_INST_FN_VARARGS(ARM_ldr_sb,    i64),
+        CREATE_INST_FN_VARARGS(ARM_ldr_sh,    i64),
+        CREATE_INST_FN_VARARGS(ARM_ldr_sw,    i64),
+        CREATE_INST_FN_VARARGS(ARM_str,       voidTy),
+        CREATE_INST_FN_VARARGS(ARM_str32,     voidTy),
+        CREATE_INST_FN_VARARGS(ARM_str32_b,   voidTy),
+        CREATE_INST_FN_VARARGS(ARM_str32_h,   voidTy),
 
         CREATE_INST_FN_VARARGS(ARM_PSEUDO_str, voidTy),
         CREATE_INST_FN_VARARGS(ARM_PSEUDO_addr_computation, i64),

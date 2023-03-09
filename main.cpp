@@ -1640,9 +1640,10 @@ namespace Codegen{
                         // "The effect of the call is undefined if the number of arguments disagrees with the number of parameters in the
                         // definition of the function", which is basically the same)
                         // so technically this is undefined behavior >:)
-                        if(auto it = SemanticAnalysis::externalFunctionsToNumParams.find(exprNode.ident.name); 
-                                it != SemanticAnalysis::externalFunctionsToNumParams.end() &&
-                                SemanticAnalysis::externalFunctionsToNumParams[exprNode.ident.name] == EXTERNAL_FUNCTION_VARARGS){
+                        using namespace SemanticAnalysis;
+                        if(auto it  = externalFunctionsToNumParams.find(exprNode.ident.name);
+                                it != externalFunctionsToNumParams.end() &&
+                                      externalFunctionsToNumParams[exprNode.ident.name] == EXTERNAL_FUNCTION_VARARGS){
                             // in this case we can create a normal call
                             return irb.CreateCall(&*callee, args);
                         }else{
@@ -2051,7 +2052,7 @@ namespace Codegen{
             // I tried to find it in the C standard, but I couldn't find any defined behavior about functions with return types not returning, undefined behavior galore
             // clang simply inserts an unreachable here (even though it is totally reachable, we have in fact proven at this point, that if its empty, it has at least has >0 uses, and otherwise it should always have uses), so that's what we'll do too
             irb.CreateUnreachable();
-            warn("Function " + fn->getName().str() + " does not seem to be guaranteed to return a value, this is undefined behvaior.");
+            warn("Function " + fn->getName().str() + " does not seem to necessarily be guaranteed to return a value, this is undefined behvaior.");
         }
     }
 
@@ -3357,7 +3358,7 @@ namespace Codegen::RegAlloc{
         /// allocates a new stackslot for a new value not already on the stack.
         /// annotates value with stackslot metadata.
         /// also immediately spills the value into the stackslot, if spill == true.
-        AllocatedStackslot allocate(llvm::Value* val, bool spill = true, llvm::Instruction* insertBefore = nullptr){
+        void allocate(llvm::Value* val, bool spill = true, llvm::Instruction* insertBefore = nullptr){
             assert(!isAllocated(val) && "value already on stack");
 
 
@@ -3390,7 +3391,6 @@ namespace Codegen::RegAlloc{
                 inst->setMetadata("stackslot_offset", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(irb.getInt64(offset))}));
             }
             enlargeSpillsAllocation(1);
-            return spillMap[val];
         }
 
         /// takes care of getting all parameters of a function call into the right register
@@ -3634,6 +3634,8 @@ namespace Codegen::RegAlloc{
                                 allocator.tryGetAndRewriteInstruction(call, arg);
                             }
                         }
+
+                        // TODO opposite for branches: they don't need to be allocated themselves (possible to check i1 return type as the conditio as the conditionn? I think that's only used for branches)
 
                         // cmp, str, etc. doesnt need an output register (cmp is not void, because the branches use it)
                         if(!allocator.isAllocated(call) && call->getCalledFunction()->getReturnType()!=voidTy && call->getCalledFunction() != instructionFunctions[ARM_cmp])

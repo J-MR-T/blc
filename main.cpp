@@ -1906,6 +1906,10 @@ namespace Codegen{
                 {
                     bool hasElse = stmtNode.children.size() == 3;
 
+                    auto condition = genExpr(stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1 with this icmp
+                    condition = irb.CreateICmp(llvm::CmpInst::ICMP_NE, condition, irb.getInt64(0));
+
+                    // to more often make use of fallthrough if genExpr itself generates new blocks, only create the blocks afterwards
                     llvm::BasicBlock* thenBB =         llvm::BasicBlock::Create(ctx, "then",   currentFunction);
                     llvm::BasicBlock* elseBB = hasElse?llvm::BasicBlock::Create(ctx, "else",   currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
                     llvm::BasicBlock* contBB =         llvm::BasicBlock::Create(ctx, "ifCont", currentFunction);
@@ -1913,10 +1917,8 @@ namespace Codegen{
                         elseBB = contBB;
                     }
 
-                    auto condition = genExpr(stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1
-                    condition = irb.CreateICmp(llvm::CmpInst::ICMP_NE, condition, irb.getInt64(0));
                     irb.CreateCondBr(condition, thenBB, elseBB);
-                    // block is now finished
+                    // current block is now finished
                     
                     auto& [thenSealed, thenVarmap] = blockInfo[thenBB];
                     thenSealed = true;

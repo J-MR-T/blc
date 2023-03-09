@@ -3401,9 +3401,13 @@ namespace Codegen::RegAlloc{
             assert(!call->getCalledFunction()->hasMetadata("arm_instruction_function") && "this is not a real function call!");
 
             nextReg = X0;
+            int i = 0;
             for(auto& arg: call->args()){
-                tryGetAndRewriteInstruction(call, arg);
+                assert(isAllocated(arg) && "function call argument not allocated");
+                auto [reg, load] = get(arg);
+                call->setArgOperand(i++, load);
             }
+            // reset nextReg
             nextReg = X0;
             allocate(call);
             return get(call).first;

@@ -191,8 +191,10 @@ namespace ArgParse{
             }else if(arg.flag){
                 std::cerr << " (flag)";
             }
-            std::cerr << std::endl;
-            std::cerr << "    " << arg.description << std::endl; // TODO string replace all \n with \n \t here
+            std::cerr << "\n    "
+            // string replace all \n with \n \t here
+            << std::regex_replace(arg.description, std::regex("\n"), "\n    ")
+            << std::endl;
         }
 
         std::cerr << 

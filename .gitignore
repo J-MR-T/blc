@@ -4,6 +4,8 @@ compile_commands.json
 main
 blc
 .cache/**
+build/**
+tests/Output/**
 
 doc
 

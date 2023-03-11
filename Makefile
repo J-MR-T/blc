@@ -1,27 +1,40 @@
 # standard cpp makefile
 
-CXXC=g++
-CFLAGS=-Wall -Wextra -Wpedantic -O3 -std=c++2b -fno-rtti -lz
-
-LLVM_CONFIG=llvm-config
-
+CXX=g++
 OUT=blc
 
-LLVM_CFLAGS=$(shell $(LLVM_CONFIG) --cppflags --ldflags --libs --system-libs --libs all) -DLLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 
+LLVM_CONFIG=llvm-config
+LLVM_FLAGS=$(shell $(LLVM_CONFIG) --cppflags --ldflags --libs --system-libs --libs all) -DLLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 
 
-ALL_FLAGS=$(CFLAGS) $(LLVM_CFLAGS)
+CXXFLAGS=-Wall -Wextra -Wpedantic -O3 -std=c++2b -fno-rtti -lz $(LLVM_FLAGS)
+DEBUGFLAGS=-fsanitize=address -fsanitize=undefined -fsanitize=leak -O0 -g
 
-SOURCES=$(wildcard *.cpp)
+SOURCES=$(wildcard src/*.cpp)
+OBJECTS=$(SOURCES:src/%.cpp=build/%.o)
 
 .PHONY: all debug clean
-all: $(SOURCES)
-	$(CXXC) $^ $(ALL_FLAGS) -DNDEBUG -o $(OUT)
 
-debug: $(SOURCES)
-	$(CXXC) $^ $(ALL_FLAGS) -fsanitize=address -fsanitize=undefined -fsanitize=leak -O0 -g -o $(OUT)
+all: setup $(SOURCES)
+	export CXXFLAGS="$(CXXFLAGS) -DNDEBUG"
+	$(MAKE) $(OUT)
+
+debug: setup $(SOURCES)
+	export CXXFLAGS="$(CXXFLAGS) $(DEBUGFLAGS)"
+	$(MAKE) $(OUT)
+
+setup:
+	mkdir -p build
+
+build/%.o: src/%.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# link
+$(OUT): $(OBJECTS)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 test: debug
 	lit -j1 -sv .
 
 clean:
-	rm $(OUT)
+	rm -rf build
+	rm -f $(OUT)

@@ -111,6 +111,5 @@ Note: Running the tests in parallel (i.e. without `-j1`) can give unexpected res
 - There is only one handwritten backend, targeting AArch64 (although there is an option to simply compile using LLVM as the backend).
 - The backend does not use a real proper IR (something like MIR etc.), but simply encodes instructions as calls to LLVM functions which represent instructions. This is obviously not ideal, but was done in order to save time and not have to design a whole new IR. Might be overhauled in the future.
 - The backend is not at all correct yet. The frontend seems to work pretty well, but the backend certainly has bugs, at least for the moment. This is still a heavy WIP.
-- Currently, the entire source is in one file. This just simplifies everything, obviating the need to repeat the declaration of every function once in a header and once in an out-of-line definition. This is a limitation, because it results in atrocious compile times (~30 seconds usually). It might be possible to separate stuff into a few files though, not one for every class, but maybe frontend.cpp/backend.cpp, to try to cut down compile times at least by a bit.
 
 

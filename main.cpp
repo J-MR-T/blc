@@ -4244,10 +4244,12 @@ int main(int argc, char *argv[]) {
         return ExitCode::SUCCESS;
     }
 
+    using namespace ArgParse;
+
     std::string inputFilename = *ArgParse::args.input;
     int iterations = 1;
-    if(ArgParse::args.iterations()){
-        iterations = std::stoi(*ArgParse::args.iterations);
+    if(args.iterations()){
+        iterations = std::stoi(*args.iterations);
     }
 
     if(access(inputFilename.c_str(),R_OK) != 0){
@@ -4258,9 +4260,9 @@ int main(int argc, char *argv[]) {
     std::string preprocessedFilePath;
 
     auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
-    if(ArgParse::args.preprocess()){
+    if(args.preprocess()){
         preprocessedFilePath="/tmp/" + std::to_string(epochsecs) + ".bpreprocessed";
-        execute("cpp", "-E", "-P", *ArgParse::args.input, "-o", preprocessedFilePath);
+        execute("cpp", "-E", "-P", *args.input, "-o", preprocessedFilePath);
 
         inputFile = std::ifstream{preprocessedFilePath};
     }
@@ -4276,7 +4278,7 @@ int main(int argc, char *argv[]) {
     }
     MEASURE_TIME_END(parse);
 
-    if(ArgParse::args.preprocess())
+    if(args.preprocess())
         std::filesystem::remove(preprocessedFilePath);
 
     MEASURE_TIME_START(semanalyze);
@@ -4297,17 +4299,17 @@ int main(int argc, char *argv[]) {
     double regallocSeconds{0.0};
     double asmSeconds{0.0};
 
-    if(parsedArgs.contains(ArgParse::args.dot) || parsedArgs.contains(ArgParse::args.url)){
-        if(ArgParse::args.url()){
+    if(parsedArgs.contains(args.dot) || parsedArgs.contains(args.url)){
+        if(args.url()){
             std::stringstream ss;
             ast->printDOT(ss);
             auto compactSpacesRegex = std::regex("\\s+");
             auto str = std::regex_replace(ss.str(), compactSpacesRegex, " ");
             std::cout << "https://dreampuf.github.io/GraphvizOnline/#" << url_encode(str) << std::endl;
         } else {
-            assert(ArgParse::args.dot());
-            if(ArgParse::args.output()){
-                std::ofstream outputFile{*ArgParse::args.output};
+            assert(args.dot());
+            if(args.output()){
+                std::ofstream outputFile{*args.output};
                 ast->printDOT(outputFile);
                 outputFile.close();
             }else{
@@ -4316,19 +4318,19 @@ int main(int argc, char *argv[]) {
         }
     }else {
         std::error_code errorCode;
-        std::string outfile = ArgParse::args.output() ? *ArgParse::args.output : "";
+        std::string outfile = args.output() ? *args.output : "";
         llvm::raw_fd_ostream llvmOut = llvm::raw_fd_ostream(outfile == ""? "-" : outfile, errorCode);
         llvm::raw_fd_ostream devNull = llvm::raw_fd_ostream("/dev/null", errorCode);
 
         MEASURE_TIME_START(codegen);
-        if(!(genSuccess = Codegen::generate(*ast, ArgParse::args.llvm() ? &llvmOut : nullptr))){
+        if(!(genSuccess = Codegen::generate(*ast, args.llvm() ? &llvmOut : nullptr))){
             llvm::errs() << "Generating LLVM-IR failed :(\nIndividual errors displayed above\n";
             goto continu;
         }
         MEASURE_TIME_END(codegen);
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
-        if(ArgParse::args.output()){
+        if(!args.isel() && !args.regalloc() && !args.asmout() && args.output()){
             // adapted from https://www.llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl08.html
             llvm::InitializeAllTargetInfos();
             llvm::InitializeAllTargets();
@@ -4352,7 +4354,7 @@ int main(int argc, char *argv[]) {
 
             auto CPU = "generic";
             auto features = "";
-            auto tempObjFileName = *ArgParse::args.output + ".o-XXXXXX";
+            auto tempObjFileName = *args.output + ".o-XXXXXX";
             auto tempObjFileFD = mkstemp(tempObjFileName.data());
 
             llvm::TargetOptions opt;
@@ -4393,7 +4395,7 @@ int main(int argc, char *argv[]) {
             if(ex("/lib/ld-linux-x86-64.so.2") && ex("/lib/crt1.o") && ex("/lib/crti.o") && ex("/lib/crtn.o")){
                 if(auto ret = execute(
                             "ld",
-                            "-o", (*ArgParse::args.output).c_str(),
+                            "-o", (*args.output).c_str(),
                             tempObjFileName.c_str(),
                             "--dynamic-linker", "/lib/ld-linux-x86-64.so.2", "-lc", "/lib/crt1.o", "/lib/crti.o", "/lib/crtn.o");
                         ret != ExitCode::SUCCESS)
@@ -4403,7 +4405,7 @@ int main(int argc, char *argv[]) {
                 if(auto ret = execute(
                             "gcc",
                             "-lc",
-                            "-o", (*ArgParse::args.output).c_str(),
+                            "-o", (*args.output).c_str(),
                             tempObjFileName.c_str());
                         ret != ExitCode::SUCCESS)
                     return ret;
@@ -4411,22 +4413,22 @@ int main(int argc, char *argv[]) {
 
             std::filesystem::remove(tempObjFileName);
 
-        }else if(!ArgParse::args.llvm()){
+        }else if(!args.llvm()){
             // isel
             MEASURE_TIME_START(isel);
-            Codegen::ISel::doISel(ArgParse::args.isel() ? &llvmOut : nullptr);
+            Codegen::ISel::doISel(args.isel() ? &llvmOut : nullptr);
             MEASURE_TIME_END(isel);
             iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
 
             // regalloc
             MEASURE_TIME_START(regalloc);
-            Codegen::RegAlloc::doRegAlloc(ArgParse::args.regalloc() ? &llvmOut : nullptr);
+            Codegen::RegAlloc::doRegAlloc(args.regalloc() ? &llvmOut : nullptr);
             MEASURE_TIME_END(regalloc);
             regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
 
             // asm
             MEASURE_TIME_START(asm);
-            (Codegen::AssemblyGen(ArgParse::args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
+            (Codegen::AssemblyGen(args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
             MEASURE_TIME_END(asm);
             asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
         }
@@ -4434,7 +4436,7 @@ int main(int argc, char *argv[]) {
 continu:
 
     //print execution times
-    if(ArgParse::args.benchmark()){
+    if(args.benchmark()){
         std::cout
         << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s\n"
         << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s\n"

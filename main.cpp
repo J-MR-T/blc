@@ -83,8 +83,15 @@ using namespace std::literals::string_literals;
 
 #ifndef NDEBUG
 #define DEBUGLOG(x) llvm::errs() << x << "\n"; fflush(stderr);
+#define IFDEBUG(x) x
+#define IFDEBUGELSE(x, y) x
+
 #else
-#define DEBUGLOG(x)
+
+#define DEBUGLOG(x, ...)
+#define IFDEBUG(x)
+#define IFDEBUGELSE(x, y) y
+
 #endif
 
 #define STRINGIZE(x) #x
@@ -3392,9 +3399,6 @@ namespace Codegen::RegAlloc{
                 // don't try to spill load the args of this instr
                 llvmSetEmptyMetadata(inst, "regAllocIgnore");
             }
-            if(auto inst = llvm::dyn_cast<llvm::Instruction>(val)) {
-                inst->setMetadata("stackslot_offset", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(irb.getInt64(offset))}));
-            }
             enlargeSpillsAllocation(1);
         }
 
@@ -3443,13 +3447,15 @@ namespace Codegen::RegAlloc{
         }
 
         // allocate a stack slot for each phi
-        unsigned phiCounter{0};
-        unsigned originalSize = allocator.spillMap.size();
+        IFDEBUG(
+            unsigned phiCounter{0};
+            unsigned originalSize = allocator.spillMap.size();
+        )
         for(auto& phi : phiNodes){
-            allocator.spillMap[&phi] = AllocatedStackslot{&phi, static_cast<int>(originalSize+phiCounter)};
-            phiCounter++;
+            allocator.allocate(&phi, false);
+            IFDEBUG(phiCounter++);
         }
-        allocator.enlargeSpillsAllocation(phiCounter);
+        assert(originalSize + phiCounter == allocator.spillMap.size() && "phi stack slots not allocated correctly");
 
         llvm::IRBuilder<>& irb  = allocator.irb;
 
@@ -3806,10 +3812,6 @@ namespace Codegen{
             }else if(auto param = llvm::dyn_cast<llvm::Argument>(v)){
                 out << regPrefix<bitwidth> << RegAlloc::llvmGetRegisterForArgument(param);
             }else if(auto call = llvm::dyn_cast<llvm::CallInst>(v)){
-                // TODO problem: this is called with allocas as args, we have to translate those to fp-relative addresses, and materialize them
-                // all of the others are handled in ptrtoint, but this cannot be done for phi nodes, as they use the ptr directly and store it somewhere (in the ARM_PSEUDO_str)
-                // the alternative would be to not do phis for ptrs (which should hopefully have happend by now, but check this again)
-                // TODO factor out this code to a helper "assert is type" or smth
                 emitReg<bitwidth>(call);
             }else if(auto poison = llvm::dyn_cast<llvm::PoisonValue>(v)){
                 // this means there is undefined behavior somewhere in the codegen, for example a division by 0, shift by >=64 etc.

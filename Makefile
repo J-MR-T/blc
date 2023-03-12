@@ -4,9 +4,9 @@ CXX=g++
 OUT=blc
 
 LLVM_CONFIG=llvm-config
-LLVM_FLAGS=$(shell $(LLVM_CONFIG) --cppflags --ldflags --libs --system-libs --libs all) -DLLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 
+LLVM_FLAGS=$(shell $(LLVM_CONFIG) --cppflags --ldflags --system-libs --libs all) -DLLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 -lLLVM-15
 
-CXXFLAGS=-Wall -Wextra -Wpedantic -O3 -std=c++2b -fno-rtti -lz $(LLVM_FLAGS)
+CXXFLAGS=$(LLVM_FLAGS) -Wall -Wextra -Wpedantic -O3 -std=c++2b -fno-rtti -lz
 DEBUGFLAGS=-fsanitize=address -fsanitize=undefined -fsanitize=leak -O0 -g
 
 SOURCES=$(wildcard src/*.cpp)

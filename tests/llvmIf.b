@@ -34,7 +34,20 @@ fn3(x, y){
         z = 55;
         return a;
     }else{
-        return fn4(a*z*x*y, y, x, z, 20);
+        auto a = a*z*x*y;
+        auto b = y;
+        auto c = x;
+        auto d = z;
+        auto e = 20;
+
+        PRINT_CUR_LINE()
+        printnum(a);
+        printnum(c);
+        printnum(e);
+
+        println();
+
+        return fn4(a, b, c, d, e);
     }
 }
 
@@ -46,6 +59,7 @@ fn4(x, y, hihi, hoho, haha){
 
     if((((a = z*x || a)*a + (z && (a && a*a))*z) > y)){
         PRINT_CUR_LINE()
+        // TODO this code somehow influences the other branch :monkaS:
         if(a+hihi) a = hihi; else a = hoho;
         if(y+hoho){
             if(y+haha){
@@ -66,7 +80,7 @@ fn4(x, y, hihi, hoho, haha){
     }else if(5) {
         PRINT_CUR_LINE()
         // TODO this currently still fails:
-        /*return x*x - (1 << 12) >> 13 + haha* hihi % haha-1;*/
+        return x  >> 13 % haha-2;
         return 0;
     }else
     return 50;
@@ -78,13 +92,18 @@ main(){
     // try all kinds of different combinations of these functions
 
     register i =0;
-    while(i < 1){
-        //srand(i);
+    while(i < 500){
+        srand(i);
         
         printnum(fn(i*5, i%3));
         printnum(fn2(i+20, i/3));
         printnum(fn3(i*i, i/5));
         printnum(fn4(i << 2, i, i-1, i*50, i/2));
+
+        printnum(fn(rand(), rand()));
+        printnum(fn2(rand(), rand()));
+        printnum(fn3(rand(), rand()));
+        printnum(fn4(rand(), rand(), rand(), rand(), rand()));
 
         i = i+1;
     }

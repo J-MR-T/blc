@@ -2064,11 +2064,6 @@ namespace Codegen::RegAlloc{
             return;
         }
 
-        // TODO why fail.b fails: local variables and phi stack space somehow managed to overlap, probably because of this manual allocation below.
-        // somewhere in fail.regalloc there is an overlap in the stack slot for a and for the phis
-        // might also be in local var allocation that this isn't taken into account
-        // actually im not so sure anymore...
-
         // allocate a stack slot for each phi
         IFDEBUG(
             unsigned phiCounter{0};
@@ -2085,13 +2080,15 @@ namespace Codegen::RegAlloc{
         // per edge:
         unsigned edges = phiNodes.begin()->getNumIncomingValues();
         for(unsigned int edgeNum = 0; edgeNum<edges; edgeNum++){
+            auto bb = phiNodes.begin()->getIncomingBlock(edgeNum);
+
             llvm::ValueMap<llvm::PHINode*, int> numReaders;
             llvm::ValueMap<llvm::PHINode*, llvm::SmallPtrSet<llvm::PHINode*, 8>> readBy;
 
             llvm::SmallPtrSet<llvm::PHINode*, 8> toHandle;
 
             for(auto& phi : phiNodes){
-                auto val = phi.getIncomingValue(edgeNum);
+                auto val = phi.getIncomingValueForBlock(bb);
                 auto otherPhi = llvm::dyn_cast_if_present<llvm::PHINode>(val);
 
                 if(otherPhi && otherPhi==&phi){
@@ -2106,7 +2103,7 @@ namespace Codegen::RegAlloc{
                 }
             }
 
-            auto insertBefore = phiNodes.begin()->getIncomingBlock(edgeNum)->getTerminator(); // insert stores to phi nodes at the end of the predecessor block (has been broken to take care of crit. edges)
+            auto insertBefore = bb->getTerminator(); // insert stores to phi nodes at the end of the predecessor block (has been broken to take care of crit. edges)
             // because isel the terminators are of course not the last instructions anymore, so correct this so it inserts before the actual branches
             // REFACTOR: this looks terrible
 
@@ -2136,7 +2133,7 @@ namespace Codegen::RegAlloc{
                 // (pseudo-)store to stack, needs to be looked at by regalloc again later on, possibly to insert load for incoming value, if its not in a register
                 irb.CreateCall(
                     instructionFunctions[ARM_PSEUDO_str],
-                    {phi->getIncomingValue(edgeNum), allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}
+                    {phi->getIncomingValueForBlock(bb), allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}
                 );
                 toHandle.erase(phi);
                 for(auto reader: readBy[phi]){
@@ -2218,7 +2215,6 @@ namespace Codegen::RegAlloc{
         }
         for(auto& param: f.args()){
             allocator.allocate(&param, true, insertBefore);
-            // cannot set metadata on function parameters, so this has to be implicit
         }
 
         // i hope this encounters stuff in the correct order
@@ -2231,26 +2227,27 @@ namespace Codegen::RegAlloc{
                         // pseudo store, we need to possibly insert load for mem-mem mov
                         allocator.irb.SetInsertPoint(call);
 
-                        auto val = call->getArgOperand(0);
+                        auto op = call->getArgOperand(0);
                         
                         // materialize constant
-                        llvm::Value* newVal = val;
-                        if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(val) ) {
+                        llvm::Value* newOp = op;
+                        if(auto constInt = llvm::dyn_cast<llvm::ConstantInt>(op) ) {
                             if(!constInt->isZero()){
                                 auto call = irb.CreateCall(instructionFunctions[ARM_mov], {irb.getInt64(constInt->getZExtValue())});
-                                newVal = call;
+                                newOp = call;
 
                                 allocator.allocate(call);
                             }else {
-                                newVal = XZR;
+                                newOp = XZR;
                             }
-                            bool isntStillConst = !llvm::isa<llvm::ConstantInt>(newVal) || newVal == XZR;
+                            bool isntStillConst = !llvm::isa<llvm::ConstantInt>(newOp) || newOp == XZR;
                             (void) isntStillConst;
                             assert(isntStillConst && "constant should have been materialized");
 
-                            call->replaceUsesOfWith(val, newVal);
+                            call->replaceUsesOfWith(op, newOp);
                         }else{
-                            allocator.tryGetAndRewriteInstruction(call, val);
+                            DEBUGLOG(irb.GetInsertBlock()->getName() << ": rewriting instruction: " << *call << " with operand " << *op << ", which is on stack position " << (allocator.spillMap[op].offset << 3));
+                            allocator.tryGetAndRewriteInstruction(call, op);
                         }
 
                         call->setCalledFunction(instructionFunctions[ARM_str]);

@@ -793,6 +793,7 @@ namespace SemanticAnalysis{
                 decls->emplace_back(info, currentNestedLevel, passedBlocksPerNestingLevel[currentNestedLevel]);
             }else{
                 bool worked = definitions.try_emplace(info->name, llvm::SmallVector<DeclarationEntry>(1, {info, currentNestedLevel, passedBlocksPerNestingLevel[currentNestedLevel]})).second;
+                (void) worked;
                 assert(worked && "should always succeed in inserting new decl list in this case");
             }
         }

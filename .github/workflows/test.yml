@@ -7,6 +7,8 @@ on:
     - "**/*.cpp"
     - ".github/**/*.yml"
     - "Makefile"
+    - "tests/**"
+    - "lit.cfg.py"
   pull_request:
 
 # This allows a subsequently queued workflow run to interrupt previous runs

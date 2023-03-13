@@ -2,11 +2,17 @@
 
 #include <iostream>
 #include <iomanip>
-#include <llvm/Support/raw_ostream.h>
 #include <string>
 #include <regex>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#pragma GCC diagnostic push 
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wcomment"
+#include <llvm/IR/Module.h>
+#include <llvm/Support/raw_ostream.h>
+#pragma GCC diagnostic pop
 
 using std::string;
 using std::string_view;
@@ -152,3 +158,5 @@ int execute(const std::string& command, char_ptr auto&&... commandArgs){
     }
     return ExitCode::SUCCESS;
 }
+
+int llvmCompileAndLinkMod(llvm::Module& mod);

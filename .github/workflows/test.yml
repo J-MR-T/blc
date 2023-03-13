@@ -6,6 +6,7 @@ on:
     paths:
     - "**/*.cpp"
     - ".github/**/*.yml"
+    - "Makefile"
   pull_request:
 
 # This allows a subsequently queued workflow run to interrupt previous runs
@@ -43,6 +44,8 @@ jobs:
         cached: ${{ steps.cache-llvm.outputs.cache-hit }}
     - name: Test Debug build (normal)
       run: make test
+    - name: Remove previous build
+      run: make clean
     - name: Test Production build
       run: make && lit -j1 -sv .
 

@@ -2823,6 +2823,8 @@ int main(int argc, char *argv[]) {
 
 #define MEASURED_TIME_AS_SECONDS(point, iterations) std::chrono::duration_cast<std::chrono::duration<double>>(point ## _end - point ## _start).count()/(static_cast<double>(iterations))
 
+    std::cout << "test\n";
+
     Codegen::initInstructionFunctions();
     auto parsedArgs = ArgParse::parse(argc, argv);
 
@@ -2918,7 +2920,9 @@ int main(int argc, char *argv[]) {
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
         if(!args.isel() && !args.regalloc() && !args.asmout() && args.output()){
-            int ret = llvmCompileAndLinkMod(*Codegen::moduleUP);
+            //int ret = llvmCompileAndLinkMod(*Codegen::moduleUP);
+			// TODO change back, this is just to minize the differences from the MLIR standalone example build to mine
+		    int ret = 0;
             if(ret != 0){
                 return ret;
             }

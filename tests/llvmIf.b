@@ -59,7 +59,6 @@ fn4(x, y, hihi, hoho, haha){
 
     if((((a = z*x || a)*a + (z && (a && a*a))*z) > y)){
         PRINT_CUR_LINE()
-        // TODO this code somehow influences the other branch :monkaS:
         if(a+hihi) a = hihi; else a = hoho;
         if(y+hoho){
             if(y+haha){
@@ -79,9 +78,7 @@ fn4(x, y, hihi, hoho, haha){
         return a;
     }else if(5) {
         PRINT_CUR_LINE()
-        // TODO this currently still fails:
         return x  >> 13 % haha-2;
-        return 0;
     }else
     return 50;
 

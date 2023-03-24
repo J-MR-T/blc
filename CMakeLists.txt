@@ -55,3 +55,4 @@ add_subdirectory(src)
 add_subdirectory(include)
 add_subdirectory(lib)
 
+# TODO define different Release/Debug builds, build release with -DNDEBUG

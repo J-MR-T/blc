@@ -1,6 +1,5 @@
 add_mlir_dialect_library(MLIRB
-		BDialect.cpp
-		BOps.cpp
+		Dialect.cpp
 
         ADDITIONAL_HEADER_DIRS
         ${PROJECT_SOURCE_DIR}/include/B

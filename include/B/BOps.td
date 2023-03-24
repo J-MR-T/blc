@@ -1,6 +1,8 @@
 #ifndef B_OPS
 #define B_OPS
 
+include "B/BDialect.td"
+
 include "mlir/IR/OpBase.td"
 
 include "mlir/IR/BuiltinTypes.td"
@@ -11,31 +13,8 @@ include "mlir/IR/BuiltinTypeInterfaces.td"
 
 include "mlir/IR/FunctionInterfaces.td"
 include "mlir/IR/SymbolInterfaces.td"
+include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
-
-// === Dialect ===
-
-def B_Dialect : Dialect {
-  let name = "b";
-
-  let summary = "An example dialect for the B language";
-
-  let description = [{
-    aaa
-  }];
-
-  let cppNamespace = "b";
-}
-
-// Base class for B dialect operations. This operation inherits from the base
-// `Op` class in OpBase.td, and provides:
-//   * The parent dialect of the operation.
-//   * The mnemonic for the operation, or the name without the dialect prefix.
-//   * A list of traits for the operation.
-class B_Op<string mnemonic, list<Trait> traits = []> :
-  Op<B_Dialect, mnemonic, traits>;
-
-// === Operations ===
 
 def SubscriptOp : B_Op<"subscript", [Pure /* no real sideeffects -> may be removed if dead */]> {
   let summary = "operation to access a fixed width amount of memory at an offset from an address";
@@ -62,9 +41,10 @@ def SubscriptOp : B_Op<"subscript", [Pure /* no real sideeffects -> may be remov
 
   let builders = [
     OpBuilder<(ins "Builtin_UnrankedMemRef":$addr, "I64":$index, /* default sizespec to 8 using CArg */ CArg<"I8Attr", "8">:$sizespec), [{
-      build(builder, result, value.getType() addr, index, sizespec);
+      build($_builder, $_state, addr, index, sizespec);
     }]>
   ];
 }
+
 
 #endif

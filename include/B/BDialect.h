@@ -7,9 +7,7 @@
 #include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#include "B/Dialect.h.inc"
 
-#define GET_OP_CLASSES
-#include "B/Ops.h.inc"
+#include "B/BOpsDialect.h.inc"
 
 #endif

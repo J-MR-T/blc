@@ -10,3 +10,5 @@ tests/Output/**
 doc
 
 hw*.txt
+
+Session.vim

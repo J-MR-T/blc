@@ -5,7 +5,7 @@
 using namespace mlir;
 using namespace mlir::b;
 
-#include "B/BOpsDialect.cpp.inc"
+//#include "B/BOpsDialect.cpp.inc"
 
 void BDialect::initialize() {
   addOperations<

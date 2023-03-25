@@ -6,7 +6,16 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "mlir/IR/Builders.h"
+
+#include "mlir/IR/BuiltinTypes.h"
+//#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinDialect.h"
+//#include "mlir/IR/BuiltinTypeInterfaces.h"
+
 #define GET_OP_CLASSES
 #include "B/BOps.h.inc"
+
 
 #endif

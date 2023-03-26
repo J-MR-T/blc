@@ -1,40 +1,28 @@
-# standard cpp makefile
+#LLVM_BUILD_DIR=~/programming/Libs/Cpp/clang+llvm-15.0.2-x86_64-unknown-linux-gnu
+# TODO make this modular
+#LLVM_BUILD_DIR=~/programming/Libs/Cpp/llvm-project/buildSchlepptop
+LLVM_BUILD_DIR=~/programming/Libs/Cpp/llvm-project/buildApoc
 
-CXX=g++
-OUT=blc
+.phony: release debug makeCMakeBearable clean setup
 
-LLVM_CONFIG=llvm-config
-LLVM_FLAGS=$(shell $(LLVM_CONFIG) --cppflags --ldflags --system-libs --libs all) -DLLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1
+release: setup
+	[ ! -f build/isDebug ] || $(MAKE) clean && $(MAKE) setup
+	touch build/isRelease
+	$(MAKE) cmake_build_type=Release makeCMakeBearable
 
-CXXFLAGS=$(LLVM_FLAGS) -Wall -Wextra -Wpedantic -O3 -std=c++2b -fno-rtti -lz
-DEBUGFLAGS=-fsanitize=address -fsanitize=undefined -fsanitize=leak -O0 -g
+debug: setup
+	[ ! -f build/isRelease ] || $(MAKE) clean && $(MAKE) setup
+	touch build/isDebug
+	$(MAKE) cmake_build_type=Debug makeCMakeBearable
 
-SOURCES=$(wildcard src/*.cpp)
-OBJECTS=$(SOURCES:src/%.cpp=build/%.o)
-
-.PHONY: all debug clean
-
-all: setup $(SOURCES)
-	export CXXFLAGS="$(CXXFLAGS) -DNDEBUG"
-	$(MAKE) $(OUT)
-
-debug: setup $(SOURCES)
-	export CXXFLAGS="$(CXXFLAGS) $(DEBUGFLAGS)"
-	$(MAKE) $(OUT)
+makeCMakeBearable: setup
+	cd build                                                                                                                                && \
+	cmake .. -DCMAKE_BUILD_TYPE=$(cmake_build_type) -DLLVM_DIR=$(LLVM_BUILD_DIR)/lib/cmake/llvm -DMLIR_DIR=$(LLVM_BUILD_DIR)/lib/cmake/mlir && \
+	cmake --build . -j$(shell nproc)                                                                                                        && \
+	cd ..
 
 setup:
 	mkdir -p build
 
-build/%.o: src/%.cpp
-	$(CXX) $< $(CXXFLAGS) -c -o $@
-
-# link
-$(OUT): $(OBJECTS)
-	$(CXX) $^ $(CXXFLAGS) -o $@
-
-test: debug
-	lit -j1 -sv .
-
 clean:
 	rm -rf build
-	rm -f $(OUT)

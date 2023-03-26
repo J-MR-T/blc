@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <optional>
 
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -6,33 +7,22 @@
 #include <llvm/Config/llvm-config.h>
 
 // stuff I assume i need for writing object files...
+#include <llvm/ADT/APFloat.h>
+#include <llvm/ADT/STLExtras.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
-#include <llvm/Support/Host.h>
-#include <llvm/ADT/Triple.h>
-#include <llvm/Object/Error.h>
-#include <llvm/Object/MachO.h>
-#include <llvm/Object/ObjectFile.h>
-#include <llvm/Object/SymbolicFile.h>
-#include <llvm/MC/MCObjectWriter.h>
-#include <llvm/MC/MCAsmBackend.h>
-#include <llvm/MC/MCAsmInfo.h>
-#include <llvm/MC/MCCodeEmitter.h>
-#include <llvm/MC/MCContext.h>
-#include <llvm/MC/MCInstrInfo.h>
-#include <llvm/MC/MCObjectWriter.h>
-#include <llvm/MC/MCRegisterInfo.h>
-#include <llvm/MC/MCSubtargetInfo.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Type.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
-#include <llvm/MC/MCTargetOptions.h>
-#include <llvm/MC/TargetRegistry.h>
-#include <llvm/MC/MCTargetOptionsCommandFlags.h>
-#include <llvm/Support/CommandLine.h>
-#include <llvm/Support/FileSystem.h>
-#include <llvm/Support/InitLLVM.h>
-#include <llvm/Support/MemoryBuffer.h>
-#include <llvm/Support/TargetSelect.h>
-#include <llvm/Support/ToolOutputFile.h>
+#include <llvm/TargetParser/Host.h>
 #pragma GCC diagnostic pop
 
 #include "util.h"
@@ -188,11 +178,16 @@ int llvmCompileAndLinkMod(llvm::Module& mod){
     using namespace ArgParse;
 
     // adapted from https://www.llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl08.html
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
-    llvm::InitializeAllAsmParsers();
-    llvm::InitializeAllAsmPrinters();
+	llvm::InitializeAllTargetInfos();
+	llvm::InitializeAllTargets();
+	llvm::InitializeAllTargetMCs();
+	llvm::InitializeAllAsmParsers();
+	llvm::InitializeAllAsmPrinters();
+	//llvm::InitializeNativeTarget();
+	//llvm::InitializeNativeTargetAsmPrinter();
+	//llvm::InitializeNativeTargetAsmParser();
+	//llvm::InitializeNativeTargetDisassembler();
+
 
     auto targetTriple = llvm::sys::getDefaultTargetTriple();
     mod.setTargetTriple(targetTriple);
@@ -214,7 +209,7 @@ int llvmCompileAndLinkMod(llvm::Module& mod){
     auto tempObjFileFD = mkstemp(tempObjFileName.data());
 
     llvm::TargetOptions opt;
-    auto RM = llvm::Optional<llvm::Reloc::Model>();
+    auto RM = std::optional<llvm::Reloc::Model>();
 
     // For some reason, the targetMachine needs to be deleted manually, so encapsulate it in a unique_ptr
     auto targetMachineUP = std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTriple, CPU, features, opt, RM));

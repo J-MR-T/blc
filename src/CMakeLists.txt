@@ -41,11 +41,11 @@ set(LIBS
         xml2
         )
 
-    # this solves the linker errors with the target specific initialize methods
-#set(LLVM_LINK_COMPONENTS
-#  ${LLVM_TARGETS_TO_BUILD}
-#  )
-#message(STATUS "LLVM link components: ${LLVM_LINK_COMPONENTS}")
+# this solves the linker errors with the target specific initialize methods
+set(LLVM_LINK_COMPONENTS
+  ${LLVM_TARGETS_TO_BUILD}
+  )
+message(STATUS "LLVM link components: ${LLVM_LINK_COMPONENTS}")
 #
 add_llvm_executable(blc main.cpp frontend.cpp util.cpp mlir.cpp)
 

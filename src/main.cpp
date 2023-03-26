@@ -2920,9 +2920,7 @@ int main(int argc, char *argv[]) {
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
         if(!args.isel() && !args.regalloc() && !args.asmout() && args.output()){
-            //int ret = llvmCompileAndLinkMod(*Codegen::moduleUP);
-			// TODO change back, this is just to minize the differences from the MLIR standalone example build to mine
-		    int ret = 0;
+            int ret = llvmCompileAndLinkMod(*Codegen::moduleUP);
             if(ret != 0){
                 return ret;
             }

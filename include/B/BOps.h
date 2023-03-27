@@ -14,6 +14,8 @@
 #include "mlir/IR/BuiltinDialect.h"
 //#include "mlir/IR/BuiltinTypeInterfaces.h"
 
+#include "B/BTypes.h"
+
 #define GET_OP_CLASSES
 #include "B/BOps.h.inc"
 

@@ -3,6 +3,8 @@
 
 include "B/BDialect.td"
 
+include "mlir/IR/AttrTypeBase.td"
+
 include "mlir/IR/OpBase.td"
 
 include "mlir/IR/BuiltinTypes.td"
@@ -13,8 +15,27 @@ include "mlir/IR/BuiltinDialect.td"
 include "mlir/IR/BuiltinTypeInterfaces.td"
 include "mlir/IR/FunctionInterfaces.td"
 include "mlir/IR/SymbolInterfaces.td"
-include "mlir/Interfaces/InferTypeOpInterface.td"
+//this also seems to break everything: "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+
+// === types ===
+
+// base type
+class B_Type<string name, string typeMnemonic, list<Trait> traits = []>
+    : TypeDef<B_Dialect, name, traits> {
+  let mnemonic = typeMnemonic;
+}
+
+def B_PointerType : B_Type<"Pointer", "ptr"> {
+  let summary = "pointer type";
+  let description = "A pointer type is a type that points to a memory location";
+
+  // I guess the parameters here are *type* parameters
+  //let parameters = (ins );
+  //let assemblyFormat = "";
+}
+
+// === ops ===
 
 def ConstantOp : B_Op<"constant", [Pure]> {
   // Provide a summary and description for this operation. This can be used to
@@ -56,8 +77,6 @@ def ConstantOp : B_Op<"constant", [Pure]> {
   let hasVerifier = 1;
 }
 
-/* Wow, tablegen actually supports nested multiline comments.
-
 def SubscriptOp : B_Op<"subscript", [Pure /* no real sideeffects -> may be removed if dead */]> {
   let summary = "operation to access a fixed width amount of memory at an offset from an address";
 
@@ -69,7 +88,7 @@ def SubscriptOp : B_Op<"subscript", [Pure /* no real sideeffects -> may be remov
     The result is the value of the memory of the specified size at the specified offset from the address.
   }];
 
-  let arguments = (ins Builtin_UnrankedMemRef:$addr, I64:$index, I8Attr:$sizespec);
+  let arguments = (ins B_PointerType:$addr, I64:$index, I8Attr:$sizespec);
 
   let results = (outs I64:$result);
 
@@ -84,13 +103,11 @@ def SubscriptOp : B_Op<"subscript", [Pure /* no real sideeffects -> may be remov
   // let assemblyFormat = ...
 
   let builders = [
-    OpBuilder<(ins "UnrankedMemRefType":$addr, "IntegerType":$index, /* default sizespec to 8 using CArg */ CArg<"IntegerAttr", "8">:$sizespec), [{
-      //build($_builder, $_state, addr, index, sizespec);
+    OpBuilder<(ins "void*":$addr, "uint64_t":$index, /* default sizespec to 8 using CArg */ CArg<"uint8_t", "8">:$sizespec), [{
+      build($_builder, $_state, addr, index, sizespec);
     }]>
   ];
 }
-
-*/
 
 
 #endif

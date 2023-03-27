@@ -1,6 +1,9 @@
 #ifndef B_DIALECT
 #define B_DIALECT
 
+// important: This file is not used directly, only by being included in the BOps file!
+// that explains why "BOpsDialect.[h/cpp].inc" needs to be used elsewhere, because this file content only *really* exists in BOps.
+
 // include stuff for tablegen
 include "mlir/IR/OpBase.td"
 

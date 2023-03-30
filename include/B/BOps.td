@@ -37,53 +37,12 @@ def B_PointerType : B_Type<"Pointer", "ptr"> {
 
 // === ops ===
 
-def ConstantOp : B_Op<"constant", [Pure]> {
-  // Provide a summary and description for this operation. This can be used to
-  // auto-generate documentation of the operations within our dialect.
-  let summary = "constant";
-  let description = [{
-    Constant operation turns a literal into an SSA value. The data is attached
-    to the operation as an attribute. For example:
-
-    ```mlir
-      %0 = toy.constant dense<[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]>
-                        : tensor<2x3xf64>
-    ```
-  }];
-
-  // The constant operation takes an attribute as the only input.
-  let arguments = (ins Builtin_UnrankedMemRef:$value);
-
-  // The constant operation returns a single value of TensorType.
-  let results = (outs Builtin_UnrankedMemRef);
-
-  // Indicate that the operation has a custom parser and printer method.
-  let hasCustomAssemblyFormat = 1;
-
-  // Add custom build methods for the constant operation. These method populates
-  // the `state` that MLIR uses to create operations, i.e. these are used when
-  // using `builder.create<ConstantOp>(...)`.
-  let builders = [
-    // Build a constant with a given constant tensor value.
-    OpBuilder<(ins "UnrankedMemRefType":$value), [{
-      build($_builder, $_state, value);
-    }]>,
-
-    // Build a constant with a given constant floating-point value.
-    OpBuilder<(ins "double":$value)>
-  ];
-
-  // Indicate that additional verification for this operation is necessary.
-  let hasVerifier = 1;
-}
-
 def SubscriptOp : B_Op<"subscript", [Pure /* no real sideeffects -> may be removed if dead */]> {
   let summary = "operation to access a fixed width amount of memory at an offset from an address";
 
   let description = [{
     This operation is used to access a fixed width amount of memory at an offset from an address.
-    The fixed width is represented by the type of 
-    The offset is specified by the index and the size of the memory is specified by the sizespec.
+    The fixed width is represented by the type of the offset is specified by the index and the size of the memory is specified by the sizespec.
     The sizespec is either 1, 2, 4 or 8 and specifies the size of the memory to access in bytes. 
     The result is the value of the memory of the specified size at the specified offset from the address.
   }];
@@ -109,5 +68,100 @@ def SubscriptOp : B_Op<"subscript", [Pure /* no real sideeffects -> may be remov
   ];
 }
 
+// alloca for local variables
+def AllocaOp : B_Op<"alloca">{
+  let summary = "operation to allocate a fixed width amount of memory on the stack";
+
+  let description = [{
+    This operation is used to allocate a fixed width amount of memory on the stack.
+    The result is the address of the allocated memory as a b.ptr.
+  }];
+
+  let arguments = (ins I32Attr:$size);
+
+  let results = (outs B_PointerType:$result);
+
+  let builders = [
+    OpBuilder<(ins CArg<"uint32_t", "8">:$size /* default to 8 bytes, because our lang basically only needs that */ ), [{
+      build($_builder, $_state, size);
+    }]>
+  ];
+}
+
+def PtrToInt : B_Op<"ptrtoint">{
+  let summary = "operation to convert a pointer to an integer";
+
+  let description = [{
+    This operation is used to convert a pointer to an integer.
+    The result is the integer representation of the pointer.
+  }];
+
+  let arguments = (ins B_PointerType:$ptr);
+
+  let results = (outs I64:$result);
+
+  let builders = [
+    OpBuilder<(ins "void*":$ptr), [{
+      build($_builder, $_state, ptr);
+    }]>
+  ];
+}
+
+def IntToPtr : B_Op<"inttoptr">{
+  let summary = "operation to convert an integer to a pointer";
+
+  let description = [{
+    This operation is used to convert an integer to a pointer.
+    The result is the pointer representation of the integer.
+  }];
+
+  let arguments = (ins I64:$intt);
+
+  let results = (outs B_PointerType:$result);
+
+  let builders = [
+    OpBuilder<(ins "uint64_t":$intt), [{
+      build($_builder, $_state, intt);
+    }]>
+  ];
+}
+
+def StoreOp : B_Op<"store">{
+  let summary = "operation to store a value to a memory location";
+
+  let description = [{
+    This operation is used to store a 64 bit value to a memory location.
+    The value is stored at the address specified by the pointer.
+  }];
+
+  let arguments = (ins B_PointerType:$ptr, I64:$value);
+
+  let results = (outs);
+
+  let builders = [
+    OpBuilder<(ins "void*":$ptr, "uint64_t":$value), [{
+      build($_builder, $_state, ptr, value);
+    }]>
+  ];
+}
+
+def LoadOp : B_Op<"load">{
+  let summary = "operation to load a value from a memory location";
+
+  let description = [{
+    This operation is used to load a 64 bit value from a memory location.
+    The value is loaded from the address specified by the pointer.
+  }];
+
+  let arguments = (ins B_PointerType:$ptr);
+
+  let results = (outs I64:$result);
+
+  let builders = [
+    OpBuilder<(ins "void*":$ptr), [{
+      build($_builder, $_state, ptr);
+    }]>
+  ];
+}
 
 #endif

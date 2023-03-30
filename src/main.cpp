@@ -49,7 +49,7 @@
 #include "util.h"
 #include "frontend.h"
 
-namespace Codegen{
+namespace Codegen::LLVM{
     bool warningsGenerated{false};
 
     llvm::LLVMContext ctx{};
@@ -786,7 +786,7 @@ namespace Codegen{
 
  */
 
-namespace Codegen::ISel{
+namespace Codegen::LLVM::ISel{
 
     // test, for the pattern matching
     struct Pattern{
@@ -1028,9 +1028,9 @@ cont:
         return matches;
     }
 
-    } // namespace Codegen::ISel
+    } // namespace Codegen::LLVM::ISel
 
-namespace Codegen{
+namespace Codegen::LLVM{
     // not an enum class for readability, all instructions are prefixed with ARM_ anyway
     enum ARMInstruction{
         ARM_add,
@@ -1169,9 +1169,9 @@ namespace Codegen{
     // ARM zero register, technically not necessary, but its nice programatically, in order not to use immediate operands where its not possible
     auto XZR = llvm::ConstantInt::get(i64, 0);
 
-} // namespace Codegen
+} // namespace Codegen::LLVM
 
-namespace Codegen::ISel{
+namespace Codegen::LLVM::ISel{
     // TODO is there any way to make this nicer? The patterns themselves have so much 'similar' code, but its hard to factor out into something common
 
 /// always inserts a mov to materialize the given constant
@@ -1871,7 +1871,7 @@ namespace Codegen::ISel{
             if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
         }
     }
-} // namespace Codegen::ISel
+} // namespace Codegen::LLVM::ISel
 
 // REFACTOR maybe at some point instruction scheduling
 
@@ -1882,7 +1882,7 @@ namespace Codegen::ISel{
 // 
 // I will probably rewrite this if I find the time and enegery, as I have learned a great deal here about how not to do this (for instance: Not doing liveness analysis was a well-considered tradeoff, that turned out to be not worth making, it just made everything harder and more inefficient)
 
-namespace Codegen::RegAlloc{
+namespace Codegen::LLVM::RegAlloc{
     // normal enum, because the int values are important and much more convenient
     // TODO add a way to make the number of used registers modular
     enum Register{
@@ -2318,9 +2318,9 @@ namespace Codegen::RegAlloc{
     }
 
     
-} // namespace Codegen::RegAlloc
+} // namespace Codegen::LLVM::RegAlloc
 
-namespace Codegen{
+namespace Codegen::LLVM{
 
     /*
        HW 9 START:
@@ -2813,7 +2813,7 @@ namespace Codegen{
     template<>
     char AssemblyGen::regPrefix<32> = 'W';
 
-} // namespace Codegen::Asm
+} // namespace Codegen::LLVM::Asm
 
 int main(int argc, char *argv[]) {
     // TODO check https://www.llvm.org/docs/Frontend/PerformanceTips.html at some point
@@ -2825,7 +2825,7 @@ int main(int argc, char *argv[]) {
 
     std::cout << "test\n";
 
-    Codegen::initInstructionFunctions();
+    Codegen::LLVM::initInstructionFunctions();
     auto parsedArgs = ArgParse::parse(argc, argv);
 
     if(ArgParse::args.help()){
@@ -2912,7 +2912,7 @@ int main(int argc, char *argv[]) {
         llvm::raw_fd_ostream devNull = llvm::raw_fd_ostream("/dev/null", errorCode);
 
         MEASURE_TIME_START(codegen);
-        if(!(genSuccess = Codegen::generate(*ast, args.llvm() ? &llvmOut : nullptr))){
+        if(!(genSuccess = Codegen::LLVM::generate(*ast, args.llvm() ? &llvmOut : nullptr))){
             llvm::errs() << "Generating LLVM-IR failed :(\nIndividual errors displayed above\n";
             goto continu;
         }
@@ -2920,26 +2920,26 @@ int main(int argc, char *argv[]) {
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
         if(!args.isel() && !args.regalloc() && !args.asmout() && args.output()){
-            int ret = llvmCompileAndLinkMod(*Codegen::moduleUP);
+            int ret = llvmCompileAndLinkMod(*Codegen::LLVM::moduleUP);
             if(ret != 0){
                 return ret;
             }
         }else if(!args.llvm()){
             // isel
             MEASURE_TIME_START(isel);
-            Codegen::ISel::doISel(args.isel() ? &llvmOut : nullptr);
+            Codegen::LLVM::ISel::doISel(args.isel() ? &llvmOut : nullptr);
             MEASURE_TIME_END(isel);
             iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
 
             // regalloc
             MEASURE_TIME_START(regalloc);
-            Codegen::RegAlloc::doRegAlloc(args.regalloc() ? &llvmOut : nullptr);
+            Codegen::LLVM::RegAlloc::doRegAlloc(args.regalloc() ? &llvmOut : nullptr);
             MEASURE_TIME_END(regalloc);
             regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
 
             // asm
             MEASURE_TIME_START(asm);
-            (Codegen::AssemblyGen(args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
+            (Codegen::LLVM::AssemblyGen(args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
             MEASURE_TIME_END(asm);
             asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
         }

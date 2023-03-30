@@ -327,7 +327,7 @@ size_t ASTNode::Hash::operator()(const ASTNode& node) const {
 
 int ASTNode::nodeCounter = 0;
 
-const std::unordered_map<ASTNode::Type, int> ASTNode::numberOfChildren = {
+const InsertOnceQueryAfterwardsMap<ASTNode::Type, int> ASTNode::numberOfChildren{{
     {ASTNode::Type::NRoot,          -1},
     {ASTNode::Type::NFunction,       2},
     {ASTNode::Type::NParamList,     -1},
@@ -342,9 +342,9 @@ const std::unordered_map<ASTNode::Type, int> ASTNode::numberOfChildren = {
     {ASTNode::Type::NExprUnOp,       1},
     {ASTNode::Type::NExprBinOp,      2},
     {ASTNode::Type::NExprSubscript,  3},
-};
+}};
 
-const std::unordered_map<ASTNode::Type, string> ASTNode::nodeTypeToDotIdentifier{
+const InsertOnceQueryAfterwardsMap<ASTNode::Type, std::string> ASTNode::nodeTypeToDotIdentifier{{
     {ASTNode::Type::NRoot,        "Root"},
     {ASTNode::Type::NFunction,    "Function"},
     {ASTNode::Type::NParamList,   "ParamList"},
@@ -359,21 +359,21 @@ const std::unordered_map<ASTNode::Type, string> ASTNode::nodeTypeToDotIdentifier
     {ASTNode::Type::NExprUnOp,    "UnOp"},
     {ASTNode::Type::NExprBinOp,   "BinOp"},
     {ASTNode::Type::NExprSubscript,   "Subscript"},
-};
+}};
 
-const std::unordered_map<ASTNode::Type, std::vector<string>> ASTNode::nodeTypeToDotStyling{
-    {ASTNode::Type::NRoot,       {"shape=house", "style=filled", "fillcolor=lightgrey"}},
-    {ASTNode::Type::NFunction,   {"shape=box", "style=filled", "fillcolor=lightblue"}},
-    {ASTNode::Type::NParamList,  {"shape=invtriangle"}},
-    {ASTNode::Type::NStmtBlock,  {"shape=invtriangle", "style=filled", "fillcolor=grey"}},
-    {ASTNode::Type::NExprUnOp,   {"style=filled", "color=chocolate3"}},
-    {ASTNode::Type::NExprBinOp,  {"style=filled", "color=chocolate1"}},
-    {ASTNode::Type::NExprVar,    {"style=filled", "color=lightblue1"}},
-    {ASTNode::Type::NStmtDecl,   {"shape=rectangle"}},
-    {ASTNode::Type::NStmtIf,     {"shape=rectangle"}},
-    {ASTNode::Type::NStmtReturn, {"shape=rectangle"}},
-    {ASTNode::Type::NStmtWhile,  {"shape=rectangle"}},
-};
+const InsertOnceQueryAfterwardsMap<ASTNode::Type, llvm::SmallVector<std::string,4>> ASTNode::nodeTypeToDotStyling{{
+    {ASTNode::Type::NRoot,        {"shape=house",          "style=filled",        "fillcolor=lightgrey"}},
+    {ASTNode::Type::NFunction,    {"shape=box",            "style=filled",        "fillcolor=lightblue"}},
+    {ASTNode::Type::NParamList,   {"shape=invtriangle"}},
+    {ASTNode::Type::NStmtBlock,   {"shape=invtriangle",    "style=filled",        "fillcolor=grey"}},
+    {ASTNode::Type::NExprUnOp,    {"style=filled",         "color=chocolate3"}},
+    {ASTNode::Type::NExprBinOp,   {"style=filled",         "color=chocolate1"}},
+    {ASTNode::Type::NExprVar,     {"style=filled",         "color=lightblue1"}},
+    {ASTNode::Type::NStmtDecl,    {"shape=rectangle"}},
+    {ASTNode::Type::NStmtIf,      {"shape=rectangle"}},
+    {ASTNode::Type::NStmtReturn,  {"shape=rectangle"}},
+    {ASTNode::Type::NStmtWhile,   {"shape=rectangle"}},
+}};
 
 std::ostream& operator<<(std::ostream& out, ASTNode& node) {
     node.printDOT(out);
@@ -384,10 +384,10 @@ ASTNode::ASTNode(Type type, string_view name, IdentifierInfo::Type t) : type(typ
 ASTNode::ASTNode(Type type, string_view name, Token::Type t)          : ASTNode(type, name, IdentifierInfo::fromTokenType(t)) {}
 ASTNode::ASTNode(Type type, int64_t value)                            : type(type), value(value) {}
 ASTNode::ASTNode(Type type, Token::Type op)                           : type(type), op(op) {}
-ASTNode::ASTNode(Type type, std::initializer_list<ASTNode> children)  : type(type), children(children) {}
+ASTNode::ASTNode(Type type, llvm::ArrayRef<ASTNode> children)         : type(type), children(children) {}
 
 string ASTNode::uniqueDotIdentifier() const {
-    return nodeTypeToDotIdentifier.at(type) + "_" + std::to_string(nodeID);
+    return nodeTypeToDotIdentifier[type] + "_" + std::to_string(nodeID);
 }
 
 string ASTNode::toString() const {
@@ -396,9 +396,9 @@ string ASTNode::toString() const {
     } else if (type == Type::NExprBinOp || type == Type::NExprUnOp) {
         return Token::toString(op);
     } else if (type == Type::NStmtDecl || type == Type::NExprVar) {
-        return nodeTypeToDotIdentifier.at(type) + "(" + IdentifierInfo::toString(ident.type) + ")" + ": " + string(ident.name);
+        return nodeTypeToDotIdentifier[type] + "(" + IdentifierInfo::toString(ident.type) + ")" + ": " + string(ident.name);
     } else {
-        return nodeTypeToDotIdentifier.at(type);
+        return nodeTypeToDotIdentifier[type];
     }
 }
 
@@ -408,7 +408,7 @@ void ASTNode::printDOT(std::ostream& out, int indentDepth, bool descend) const {
     out << indent << uniqueDotIdentifier() << " [label=\"" << toString()
         << "\"";
     if (nodeTypeToDotStyling.contains(type)) {
-        for (auto& styleInstr : nodeTypeToDotStyling.at(type)) {
+        for (auto& styleInstr : nodeTypeToDotStyling[type]) {
                 out << ", " << styleInstr;
         }
     }
@@ -456,10 +456,16 @@ size_t AST::getRoughMemoryFootprint() {
 bool AST::validate() {
     bool valid = true;
     root.iterateChildren([&valid](ASTNode& node) {
-        auto number = ASTNode::numberOfChildren.at(node.type);
+        auto number = ASTNode::numberOfChildren[node.type];
         if (number > 0 && node.children.size() != static_cast<size_t>(number)) {
             std::cerr << "Node " << node.uniqueDotIdentifier() << " has " << node.children.size() << " children, but should have " << number << "\n";
             valid = false;
+        }else{
+            auto atLeast = number-1;
+            if(node.children.size() < static_cast<size_t>(atLeast)){
+                std::cerr << "Node " << node.uniqueDotIdentifier() << " has " << node.children.size() << " children, but should have at least " << atLeast << "\n";
+                valid = false;
+            }
         }
     });
     return valid;
@@ -585,9 +591,9 @@ ASTNode Parser::parsePrimaryExpression(){
         unOp.children.emplace_back(parseExpr(13)); //unary ops have 13 prec, rassoc
         return unOp;
     }else if(tok.matchToken(Token::Type::IDENTIFIER)){
-        auto ident = tok.matched.value;
+        auto identStrV = tok.matched.value;
         if(tok.matchToken(Token::Type::L_PAREN)){
-            auto call = ASTNode(ASTNode::Type::NExprCall, ident);
+            auto call = ASTNode(ASTNode::Type::NExprCall, identStrV);
             while(!tok.matchToken(Token::Type::R_PAREN)){
                 call.children.emplace_back(parseExpr());
                 if(tok.matchToken(Token::Type::COMMA)){
@@ -600,7 +606,7 @@ ASTNode Parser::parsePrimaryExpression(){
             }
             return call;
         }else{
-            return ASTNode(ASTNode::Type::NExprVar, ident);
+            return ASTNode(ASTNode::Type::NExprVar, identStrV);
         }
     }else if(tok.matchToken(Token::Type::L_PAREN)){
         auto expr = parseExpr(0);
@@ -737,6 +743,7 @@ unique_ptr<AST> Parser::parse(){
     return ast;
 }
 
+// TODO maybe integrate this into the actual parsing at some point
 namespace SemanticAnalysis{
     bool failed{false};
     llvm::StringMap<int> externalFunctionsToNumParams{};
@@ -894,9 +901,9 @@ namespace SemanticAnalysis{
             }
         }else if(node.type == ASTNode::Type::NExprVar){
             auto* declInfo  = scopes[node.ident.name];
-            if(!declInfo){
+            if(!declInfo)
                 return;
-            }
+
             // we could also try to pointer things up a bit and use the same identifier info for all nodes, but we would then just have a data union of an actual ident info and an ident info pointer, which doesn't save space. It only complicates the maintenance of things, and as this is only assigned once, there are also no redunandancy issues afterwards, so just duplicate it for simplicity.
             node.ident.uID  = declInfo->uID;
             node.ident.type = declInfo->type;
@@ -904,6 +911,8 @@ namespace SemanticAnalysis{
             return;
         }else if((node.type == ASTNode::Type::NExprBinOp && node.op == Token::Type::ASSIGN) || (node.type == ASTNode::Type::NExprUnOp && node.op == Token::Type::AMPERSAND)){
             if(node.type == ASTNode::Type::NExprUnOp && node.children[0].type == ASTNode::Type::NExprVar){
+				assert(node.op == Token::Type::AMPERSAND);
+
                 // register variables and parameters are not permitted as operands to the unary addrof & operator
                 // subscript is fine and thus left out here
                 if(auto declIdentInfo = scopes[node.children[0].ident.name]; !declIdentInfo || declIdentInfo->type!=IdentifierInfo::AUTO){

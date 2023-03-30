@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -123,6 +124,66 @@ namespace ArgParse{
     std::map<Arg, std::string>& parse(int argc, char *argv[]);
 
 } // end namespace ArgParse
+
+// like https://www.llvm.org/docs/ProgrammersManual.html#dss-sortedvectormap recommends, use a sorted vector for strict insert then query map (this is even a subset of that, it doesn't support inserting after building at all)
+template<std::totally_ordered K, typename V>
+struct InsertOnceQueryAfterwardsMap{
+	using ElemPairType = typename std::pair<K,V>;
+
+	static int compare(const ElemPairType& elem1, const ElemPairType& elem2){
+		return elem1.first < elem2.first;
+	}
+
+	llvm::SmallVector<ElemPairType> vec;
+
+	InsertOnceQueryAfterwardsMap() = default;
+
+	InsertOnceQueryAfterwardsMap(const llvm::ArrayRef<ElemPairType> &arr) : vec(arr){
+		std::sort(vec.begin(), vec.end(), compare);
+	}
+
+    /// only supports lookup of actually inserted items, will segfault otherwise
+	const V& operator[](const K &key) const{
+        assert(std::is_sorted(vec.begin(), vec.end(), compare) && "InsertOnceQueryAfterwardsMap not sorted");
+
+		auto it = std::lower_bound(vec.begin(), vec.end(), ElemPairType{key,V{}}, compare); // the V{} is just a dummy value, it will be ignored
+		assert((it != vec.end() && it->first == key) && "Item from InsertOnceQueryAfterwardsMap not found");
+		return it->second;
+	}
+
+    /// at
+    /*
+    std::optional<const V&> at(const K &key) const{
+        assert(std::is_sorted(vec.begin(), vec.end(), compare) && "InsertOnceQueryAfterwardsMap not sorted");
+
+        auto it = std::lower_bound(vec.begin(), vec.end(), ElemPairType{key,V{}}, compare); // the V{} is just a dummy value, it will be ignored
+        if(it != vec.end() && it->first == key)
+            return {it->second};
+        else
+            return {};
+    }
+    */
+
+    bool contains(const K &key) const{
+        assert(std::is_sorted(vec.begin(), vec.end(), compare) && "InsertOnceQueryAfterwardsMap not sorted");
+
+        auto it = std::lower_bound(vec.begin(), vec.end(), ElemPairType{key,V{}}, compare); // the V{} is just a dummy value, it will be ignored
+        return it != vec.end() && it->first == key;
+    }
+
+	// expose iterators
+
+	typename llvm::SmallVector<ElemPairType>::iterator begin(){
+		return &*vec.begin();
+	}
+
+	typename llvm::SmallVector<ElemPairType>::iterator end(){
+		return &*vec.end();
+	}
+};
+
+// explicit instantiation to catch errors
+template struct InsertOnceQueryAfterwardsMap<int, llvm::SmallString<32>>;
 
 string url_encode(const string& value);
 

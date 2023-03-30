@@ -158,14 +158,12 @@ public:
         NStmtIf,        // possible children: [expr, stmt, stmt (optional else)]
         NExprVar,       // possible children: [], identifier: yes
         NExprNum,       // possible children: [], value: yes
-        NExprCall,      // possible children: [expr*], name: yes
+        NExprCall,      // possible children: [expr*], identifier: yes
         NExprUnOp,      // possible children: [expr], op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
         NExprBinOp,     // possible children: [expr, expr], op: yes (all the binary operators possible)
         NExprSubscript, // possible children: [expr(addr), expr(index), num (sizespec, 1/2/4/8)]
     };
 
-    /// maps the type of a node to the number of children it should have, used for error checking. -1 means arbitrary number of children
-    static const std::unordered_map<Type, int> numberOfChildren;
     class Hash{
     public:
         size_t operator()(const ASTNode &node) const;
@@ -176,8 +174,10 @@ public:
     static int nodeCounter; // initialized to 0
     uint64_t nodeID = nodeCounter++;
 
-    static const std::unordered_map<Type, string> nodeTypeToDotIdentifier;
-    static const std::unordered_map<Type, std::vector<string>> nodeTypeToDotStyling;
+    /// maps the type of a node to the number of children it should have, used for validation. -n with n>1 means at least (n-1) children -> for example -1 means 0 or more children (any number)
+    static const InsertOnceQueryAfterwardsMap<ASTNode::Type, int> numberOfChildren;
+    static const InsertOnceQueryAfterwardsMap<ASTNode::Type, std::string> nodeTypeToDotIdentifier;
+    static const InsertOnceQueryAfterwardsMap<ASTNode::Type, llvm::SmallVector<std::string,4>> nodeTypeToDotStyling;
 
     /// node attributes
     union{
@@ -196,7 +196,7 @@ public:
 
     ASTNode(Type type, Token::Type op);
 
-    ASTNode(Type type, std::initializer_list<ASTNode> children);
+    ASTNode(Type type, llvm::ArrayRef<ASTNode> children);
 
     string uniqueDotIdentifier() const;
 

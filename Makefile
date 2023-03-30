@@ -16,10 +16,12 @@ debug: setup
 	$(MAKE) cmake_build_type=Debug makeCMakeBearable
 
 makeCMakeBearable: setup
-	cd build                                                                                                                                && \
+	# the - makes it continue, even if the build fails, so that the sed is executed
+	-cd build                                                                                                                                && \
 	cmake .. -DCMAKE_BUILD_TYPE=$(cmake_build_type) -DLLVM_DIR=$(LLVM_BUILD_DIR)/lib/cmake/llvm -DMLIR_DIR=$(LLVM_BUILD_DIR)/lib/cmake/mlir && \
 	cmake --build . -j$(shell nproc)                                                                                                        && \
 	cd ..
+	sed -i 's/-std=gnu++23/-std=c++2b/g' build/compile_commands.json # to make it work for clangd, can't be bothered to try with cmake
 
 setup:
 	mkdir -p build

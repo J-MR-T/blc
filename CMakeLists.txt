@@ -54,5 +54,3 @@ add_subdirectory(src)
 # defines dialects etc.
 add_subdirectory(include)
 add_subdirectory(lib)
-
-# TODO define different Release/Debug builds, build release with -DNDEBUG

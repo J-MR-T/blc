@@ -8,17 +8,17 @@
 include "mlir/IR/OpBase.td"
 
 def B_Dialect : Dialect {
-    let name = "b";
+  let name = "b";
 
-    let summary = "An example dialect for the B language";
+  let summary = "An example dialect for the B language";
 
-    let description = [{
-        aaa
-    }];
+  let description = [{
+      An example dialect for the B language
+  }];
 
-    let cppNamespace = "::mlir::b";
+  let cppNamespace = "::mlir::b";
 
-    let useDefaultTypePrinterParser = 1;
+  let useDefaultTypePrinterParser = 1;
 }
 
 class B_Op<string mnemonic, list<Trait> traits = []> :

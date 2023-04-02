@@ -1,6 +1,8 @@
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/Value.h>
 #include <mlir/Dialect/Traits.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
+#include <mlir/Dialect/Arith/IR/Arith.h>
 #include <mlir/IR/MLIRContext.h>
 // module op
 //#include <mlir/Dialect/ControlFlow/IR/ControlFlow.h>
@@ -44,22 +46,171 @@
 */
 
 namespace Codegen::MLIR {
+    bool warningsGenerated{false};
+
+    void warn(printable auto... args){
+        if(!ArgParse::args.nowarn()){
+            llvm::errs() << "Warning: ";
+            (llvm::errs() << ... << args) << "\n";
+            warningsGenerated = true;
+        }
+    }
+
+    void warn(const std::string& msg, mlir::Value value = {}){
+        if(!ArgParse::args.nowarn()){
+            llvm::errs() << "Warning: " << msg;
+            if(value)
+                llvm::errs() << " at " << value;
+            llvm::errs() << "\n";
+            warningsGenerated = true;
+        }
+    }
+
 	mlir::ModuleOp mod;
     // TODO add locations
     mlir::Location loc = mlir::UnknownLoc::get(mod.getContext());
     mlir::Type i64 = mlir::IntegerType::get(mod.getContext(), 64);
 
-	mlir::Value mlirGenFunction(ASTNode& fnNode){
+	// TODO well, take care of this annoying scf.yield/return business
+
+	mlir::Value genStmts(ASTNode& blockNode, mlir::OpBuilder& builder);
+
+	mlir::Value genStmt(ASTNode& blockNode, mlir::OpBuilder& builder){
+
+	}
+
+	mlir::Value genStmts(ASTNode& blockNode, mlir::OpBuilder& builder){
+		for(auto& stmtNode : blockNode.children){
+			genStmt(stmtNode, builder);
+            if(stmtNode.type == ASTNode::Type::NStmtReturn)
+                // stop the generation for this block
+                break;
+		}
+	}
+
+	mlir::Value genExpr(ASTNode& exprNode, mlir::OpBuilder& builder){
+        using namespace mlir::arith;
+        using Type = Token::Type;
+
+		switch(exprNode.type){
+			case ASTNode::Type::NExprVar:
+				{
+					// TODO do ssa construction/variable lookup
+
+				}
+			case ASTNode::Type::NExprNum:
+				return builder.create<mlir::arith::ConstantIntOp>(loc, exprNode.value, i64);
+			case ASTNode::Type::NExprBinOp:
+                {
+				auto childOp1 = genExpr(exprNode.children[0], builder);
+				auto childOp2 = genExpr(exprNode.children[1], builder);
+				switch(exprNode.op){
+					// sadly no nicer way to just change the Op type, can't just save a type as a variable and use a unified case :(
+					// and using op names instead would mean they'd have to be parsed again (right?), that would be a waste
+
+                    // bitwise
+                    case Type::AMPERSAND:   return builder.create<AndIOp>(loc, std::move(childOp1), std::move(childOp2));
+                    case Type::BITWISE_OR:  return builder.create<OrIOp> (loc, std::move(childOp1), std::move(childOp2));
+                    case Type::BITWISE_XOR: return builder.create<XOrIOp>(loc, std::move(childOp1), std::move(childOp2));
+
+                    // arithmetic
+					case Type::PLUS:   return builder.create<AddIOp> (loc, std::move(childOp1), std::move(childOp2));
+					case Type::MINUS:  return builder.create<SubIOp> (loc, std::move(childOp1), std::move(childOp2));
+					case Type::TIMES:  return builder.create<MulIOp> (loc, std::move(childOp1), std::move(childOp2));
+					case Type::DIV:    return builder.create<DivSIOp>(loc, std::move(childOp1), std::move(childOp2));
+					case Type::MOD:    return builder.create<RemSIOp>(loc, std::move(childOp1), std::move(childOp2));
+					case Type::SHIFTL: return builder.create<ShLIOp> (loc, std::move(childOp1), std::move(childOp2));
+					case Type::SHIFTR: return builder.create<ShRSIOp>(loc, std::move(childOp1), std::move(childOp2));
+
+				    // comparisons
+					default:
+                        CmpIPredicate pred;
+                        switch(exprNode.op){
+                            case Type::EQUAL:         pred = CmpIPredicate::eq;  break;
+                            case Type::NOT_EQUAL:     pred = CmpIPredicate::ne;  break;
+                            case Type::LESS:          pred = CmpIPredicate::slt; break;
+                            case Type::GREATER:       pred = CmpIPredicate::sgt; break;
+                            case Type::LESS_EQUAL:    pred = CmpIPredicate::sle; break;
+                            case Type::GREATER_EQUAL: pred = CmpIPredicate::sge; break;
+                            default:
+                                assert(false);
+                                break;
+                        }
+                        return builder.create<mlir::arith::CmpIOp>(loc, pred, std::move(childOp1), std::move(childOp2));
+				}
+                assert(false);
+                }
+			case ASTNode::Type::NExprUnOp:
+                {
+				auto childOp = genExpr(exprNode.children[0], builder);
+                switch(exprNode.op){
+                    case Type::MINUS:
+                        return builder.create<SubIOp>(loc, builder.create<ConstantIntOp>(loc, 0, i64),    childOp);
+                    case Type::TILDE:
+                        return builder.create<XOrIOp>(loc, builder.create<ConstantIntOp>(loc, -1ll, i64), childOp);
+                    case Type::LOGICAL_NOT:
+                        return builder.create<ExtUIOp>(loc, i64,
+                            builder.create<CmpIOp>(loc, CmpIPredicate::eq, childOp, builder.create<ConstantIntOp>(loc, 0, i64))
+                        );
+                    default:
+                        assert(false);
+                        break;
+                }
+                assert(false);
+                }
+			case ASTNode::Type::NExprCall:
+                {
+                auto calledFn = exprNode.ident.name;
+
+                // TODO I bet this doesn't work with functions which aren't declared yet
+                auto callee = mod.lookupSymbol<mlir::func::FuncOp>(calledFn);
+                assert(callee && "Function for call not found -> TODO: forward declarations");
+
+
+                llvm::SmallVector<mlir::Value, 8> args(exprNode.children.size());
+                for(unsigned int i = 0; i < exprNode.children.size(); ++i)
+                    args[i] = genExpr(exprNode.children[i], builder);
+
+                if(args.size() != callee->getNumOperands()){
+                    // hw02.txt: "Everything else is handled as in ANSI C", hw04.txt: "note that parameters/arguments do not need to match"
+                    // but: from the latest C11 standard draft: "the number of arguments shall agree with the number of parameters"
+                    // (i just hope thats the same as in C89/ANSI C, can't find that standard anywhere online, Ritchie & Kernighan says this:
+                    // "The effect of the call is undefined if the number of arguments disagrees with the number of parameters in the
+                    // definition of the function", which is basically the same)
+                    // so technically this is undefined behavior >:)
+                    using namespace SemanticAnalysis;
+                    if(auto it  = externalFunctionsToNumParams.find(exprNode.ident.name);
+                            it == externalFunctionsToNumParams.end() ||
+                                  externalFunctionsToNumParams[exprNode.ident.name] != EXTERNAL_FUNCTION_VARARGS){
+                        // in this case, the function is either not found or not varargs, so something weird is going on
+                        warn("Call to function ", exprNode.ident.name, " with ", args.size(), " arguments, but function has ", callee->getNumOperands(), " parameters");
+                        return mlir::Value();
+                    }
+                }
+                return builder.create<mlir::func::CallOp>(loc, callee, args).getResult(0);
+                }
+			case ASTNode::Type::NExprSubscript:
+				// TODO
+				break;
+			default:
+				break;
+		}
+
+        assert(false);
+	}
+
+	mlir::func::FuncOp genFunction(ASTNode& fnNode){
         mlir::OpBuilder builder(mod.getContext());
 
         auto& paramListNode = fnNode.children[0];
         auto& bodyNode = fnNode.children[1];
-        builder.getFunctionType(std::vector(bodyNode.children.size(), i64), i64);
 
-        // TODO parameters
-        
+		// parameters
+        auto fnType = builder.getFunctionType(std::vector(bodyNode.children.size(), i64), i64);
+		auto fn = builder.create<mlir::func::FuncOp>(loc, fnNode.ident.name, fnType);
 
-        return mlir::Value(); // TODO fix
+		genStmts(bodyNode, builder);
+
+        return fn;
 	}
-
 };

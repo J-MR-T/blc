@@ -15,6 +15,8 @@
 #include <llvm/Support/raw_ostream.h>
 #pragma GCC diagnostic pop
 
+// === shorthands and exit codes === 
+
 using std::string;
 using std::string_view;
 using std::unique_ptr;
@@ -53,6 +55,21 @@ enum {
     errx(ExitCode::TODO, "TODO(Line " STRINGIZE_MACRO(__LINE__) "): " x "\n");
 
 #define EXIT_TODO EXIT_TODO_X("Not implemented yet.")
+
+// === concepts === 
+
+template<typename T>
+concept printable = requires(T t){
+    llvm::outs() << t;
+    llvm::errs() << t;
+};
+
+template<typename T>
+concept char_ptr = requires(T t){
+    {t[0]} -> std::convertible_to<const char>;
+};
+
+// === argparse === 
 
 namespace ArgParse{
     struct Arg{
@@ -125,6 +142,8 @@ namespace ArgParse{
 
 } // end namespace ArgParse
 
+// === datastructures ===
+
 // like https://www.llvm.org/docs/ProgrammersManual.html#dss-sortedvectormap recommends, use a sorted vector for strict insert then query map (this is even a subset of that, it doesn't support inserting after building at all)
 template<std::totally_ordered K, typename V>
 struct InsertOnceQueryAfterwardsMap{
@@ -185,12 +204,9 @@ struct InsertOnceQueryAfterwardsMap{
 // explicit instantiation to catch errors
 template struct InsertOnceQueryAfterwardsMap<int, llvm::SmallString<32>>;
 
-string url_encode(const string& value);
+// === misc === 
 
-template<typename T>
-concept char_ptr = requires(T t){
-    {t[0]} -> std::convertible_to<const char>;
-};
+string url_encode(const string& value);
 
 int execute(const std::string& command, char_ptr auto&&... commandArgs){
     pid_t pid;

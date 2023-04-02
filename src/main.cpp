@@ -58,12 +58,6 @@ namespace Codegen::LLVM{
     llvm::Type* voidTy = llvm::Type::getVoidTy(ctx);
     llvm::Function* currentFunction = nullptr;
 
-    template<typename T>
-    concept printable = requires(T t){
-        llvm::outs() << t;
-        llvm::errs() << t;
-    };
-
     void warn(printable auto... args){
         if(!ArgParse::args.nowarn()){
             llvm::errs() << "Warning: ";
@@ -232,19 +226,16 @@ namespace Codegen::LLVM{
 
     llvm::Type* sizespecToLLVMType(ASTNode& sizespecNode, llvm::IRBuilder<>& irb){
         auto sizespecInt = sizespecNode.value;
-        llvm::Type* type;
         if(sizespecInt == 1){
-            type = irb.getInt8Ty();
+            return irb.getInt8Ty();
         }else if(sizespecInt == 2){
-            type = irb.getInt16Ty();
+            return irb.getInt16Ty();
         }else if(sizespecInt == 4){
-            type = irb.getInt32Ty();
-        }else if(sizespecInt == 8){
-            type = irb.getInt64Ty();
+            return irb.getInt32Ty();
         }else{
-            errx(ExitCode::ERROR_CODEGEN, "Something has gone seriously wrong here, got a sizespec of %ld bytes", sizespecInt);
+            assert(sizespecInt == 8 && "invalid sizespec");
+            return irb.getInt64Ty();
         }
-        return type;
     }
 
 
@@ -256,10 +247,10 @@ namespace Codegen::LLVM{
                 return llvm::ConstantInt::get(i64, exprNode.value);
             case ASTNode::Type::NExprCall: 
                 {
-                    std::vector<llvm::Value*> args(exprNode.children.size());
-                    for(unsigned int i = 0; i < exprNode.children.size(); ++i){
+                    llvm::SmallVector<llvm::Value*, 8> args(exprNode.children.size());
+                    for(unsigned int i = 0; i < exprNode.children.size(); ++i)
                         args[i] = genExpr(exprNode.children[i], irb);
-                    }
+
                     auto callee = findFunction(exprNode.ident.name);
                     assert(callee && "got a call to a function that doesn't exist, but was neither forward declared, nor implicitly declared, this should never happen");
                     if(args.size() != callee->arg_size()){
@@ -271,29 +262,22 @@ namespace Codegen::LLVM{
                         // so technically this is undefined behavior >:)
                         using namespace SemanticAnalysis;
                         if(auto it  = externalFunctionsToNumParams.find(exprNode.ident.name);
-                                it != externalFunctionsToNumParams.end() &&
-                                      externalFunctionsToNumParams[exprNode.ident.name] == EXTERNAL_FUNCTION_VARARGS){
-                            // in this case we can create a normal call
-                            return irb.CreateCall(&*callee, args);
-                        }else{
+                                it == externalFunctionsToNumParams.end() ||
+                                      externalFunctionsToNumParams[exprNode.ident.name] != EXTERNAL_FUNCTION_VARARGS){
                             // otherwise, there is something weird going on
                             warn("Call to function ", exprNode.ident.name, " with ", args.size(), " arguments, but function has ", callee->arg_size(), " parameters");
                             return llvm::PoisonValue::get(i64);
                         }
-                    }else{
-                        return irb.CreateCall(&*callee, args);
                     }
+                    return irb.CreateCall(&*callee, args);
                 }
-                break;
             case ASTNode::Type::NExprUnOp:
                 {
                     auto& operandNode = exprNode.children[0];
                     switch(exprNode.op){
                         // can be TILDE, MINUS, AMPERSAND, LOGICAL_NOT
-                        case Token::Type::TILDE:
-                            return irb.CreateNot(genExpr(operandNode, irb));
-                        case Token::Type::MINUS:
-                            return irb.CreateNeg(genExpr(operandNode, irb)); // creates a sub with 0 as first op
+                        case Token::Type::TILDE: return irb.CreateNot(genExpr(operandNode, irb)); // creates an all-ones XOR
+                        case Token::Type::MINUS: return irb.CreateNeg(genExpr(operandNode, irb)); // creates a sub with 0 as first op
                         case Token::Type::LOGICAL_NOT:
                             {
                                 auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_EQ, genExpr(operandNode, irb), irb.getInt64(0));
@@ -306,6 +290,8 @@ namespace Codegen::LLVM{
                                     auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode);
                                     return irb.CreatePtrToInt(ptr, i64);
                                 }else{ /* has to be a subscript in this case, because of the SemanticAnalysis constraints */
+                                    assert(operandNode.type == ASTNode::Type::NExprSubscript && "got a & operator on something that isn't a variable or a subscript");
+
                                     // REFACTOR: would be nice to merge this with the code for loading from subscripts at some point, its almost the same
                                     auto& addrNode     = operandNode.children[0];
                                     auto& indexNode    = operandNode.children[1];

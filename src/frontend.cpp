@@ -407,18 +407,17 @@ void ASTNode::printDOT(std::ostream& out, int indentDepth, bool descend) const {
 
     out << indent << uniqueDotIdentifier() << " [label=\"" << toString()
         << "\"";
-    if (nodeTypeToDotStyling.contains(type)) {
-        for (auto& styleInstr : nodeTypeToDotStyling[type]) {
-                out << ", " << styleInstr;
-        }
-    }
+    if (nodeTypeToDotStyling.contains(type))
+        for (auto& styleInstr : nodeTypeToDotStyling[type])
+            out << ", " << styleInstr;
+
     out << "];" << std::endl;
 
     if (descend) {
         for (auto& child : children) {
-                out << indent << uniqueDotIdentifier() << " -> "
-                    << child.uniqueDotIdentifier() << ";" << std::endl;
-                child.printDOT(out, indentDepth + 1);
+            out << indent << uniqueDotIdentifier() << " -> "
+                << child.uniqueDotIdentifier() << ";" << std::endl;
+            child.printDOT(out, indentDepth + 1);
         }
     }
 }

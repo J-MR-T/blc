@@ -99,18 +99,19 @@ namespace ArgParse{
     const struct {
         const Arg help{      "h", "help"      , 0, "Show this help message and exit"                                                                     , false, true};
         const Arg input{     "i", "input"     , 1, "Input file"                                                                                          ,  true, false};
-        const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format (to stdout by default, or file using -o) (overrides -p)"           , false, true};
-        const Arg output{    "o", "output"    , 2, "Output file"                                                                                         , false, false};
+        const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format"                                                                   , false, true};
+        const Arg output{    "o", "output"    , 2, "Compile and link to output file supplied here, using LLVM by default, or MLIR if -m is set"          , false, false};
         const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
         const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
-        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o.\n"
-                                                   "Disables the rest of the compilation process"                                                        , false, true};
+        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o.\n", false, true};
         const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
         const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
         const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
         const Arg asmout{    "a", "asm"       , 0, "Output (ARM-) assembly"                                                                              , false, true};
+		const Arg mlir{      "m", "mlir"      , 0, "Print MLIR if used without -o. Compiles to object file and links to executable if used with -o.\n"
+                                                   "Disables the rest of the compilation process"                                                        , false, true};
 
 
         const Arg sentinel{"", "", 0, "", false, false};

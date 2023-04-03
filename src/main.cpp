@@ -656,8 +656,9 @@ namespace Codegen::LLVM{
         }
 
         auto& blockNode = fnNode.children[1];
-        genStmt(blockNode, irb); // calls gen stmts on the blocks children, but does additional stuff
+        genStmt(blockNode, irb); // calls gen stmts on the blocks children
 
+		// in case the user didn't return
         auto insertBlock = irb.GetInsertBlock();
         if(insertBlock->hasNUses(0) && insertBlock!=&currentFunction->getEntryBlock()){
             // if the block is unused (for example unreachable because of return statements in all theoretical predecessors), we discard it
@@ -673,7 +674,7 @@ namespace Codegen::LLVM{
         }
     }
 
-    bool generate(AST& ast, llvm::raw_ostream* out){
+    bool generate(AST& ast){
         ASTNode& root = ast.root;
 
         // declare implicitly declared functions
@@ -714,9 +715,6 @@ namespace Codegen::LLVM{
 
 
         bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
-        if(out){
-            moduleUP->print(*out, nullptr);
-        }
 
         if(warningsGenerated)
             llvm::errs() << "Warnings were generated during code generation, please check the output for more information\n";
@@ -1834,7 +1832,7 @@ namespace Codegen::LLVM::ISel{
         ),
     };
 
-    void doISel(llvm::raw_ostream* out){
+    void doISel(){
         // add metadata to instr functions
         for(auto& instr : instructionFunctions){
             instr.second->setMetadata("arm_instruction_function", llvm::MDNode::get(ctx, {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64,std::to_underlying(instr.first)))}));
@@ -1851,11 +1849,8 @@ namespace Codegen::LLVM::ISel{
             matchPatterns(&fn, patterns);
         }
 
-        if(out){
-            moduleUP->print(*out, nullptr);
-            bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
-            if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
-        }
+		bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
+		if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
     }
 } // namespace Codegen::LLVM::ISel
 
@@ -2287,7 +2282,7 @@ namespace Codegen::LLVM::RegAlloc{
         }
     }
 
-    void doRegAlloc(llvm::raw_ostream* out){
+    void doRegAlloc(){
         for(auto& f : *moduleUP){
             if(f.isDeclaration()){
                 continue;
@@ -2296,11 +2291,8 @@ namespace Codegen::LLVM::RegAlloc{
             regallocFn(f);
         }
 
-        if(out){
-            moduleUP->print(*out, nullptr);
-            bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
-            if(moduleIsBroken) llvm::errs() << "RegAlloc broke module :(\n";
-        }
+		bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
+		if(moduleIsBroken) llvm::errs() << "RegAlloc broke module :(\n";
     }
 
     
@@ -2891,43 +2883,77 @@ int main(int argc, char *argv[]) {
                 ast->printDOT(std::cout);
             }
         }
-    }else {
+    } else {
+		// behavior for the args: if mlir() is set, we output either mlir, or a binary, depending on -o. Otherwise:
+		// we always generate the llvm module
+		// if output is set, we produce a binary from the llvm module, otherwise
+		// we do isel, regalloc and asm and
+		// if llvm, isel, regalloc or asmout are set, we output the corresponding IR
+
         std::error_code errorCode;
-        std::string outfile = args.output() ? *args.output : "";
-        llvm::raw_fd_ostream llvmOut = llvm::raw_fd_ostream(outfile == ""? "-" : outfile, errorCode);
+        std::string outfile = args.output() ? *args.output : "-"; // "-" == stdout
+        llvm::raw_fd_ostream llvmOut = llvm::raw_fd_ostream(outfile, errorCode);
         llvm::raw_fd_ostream devNull = llvm::raw_fd_ostream("/dev/null", errorCode);
 
+		if(errorCode){
+			err(ExitCode::ERROR_IO, "Could not open output file %s", outfile.c_str());
+		}
+
+		if(args.mlir()){
+			// TODO
+			// genSuccess = Codegen::MLIR::generate()
+
+			if(args.output()){
+				// TODO mlir mod -> llvm mod -> binary
+			}else{
+				// TODO print mlir mod to llvmOut
+			}
+			goto continu;
+		}
+
         MEASURE_TIME_START(codegen);
-        if(!(genSuccess = Codegen::LLVM::generate(*ast, args.llvm() ? &llvmOut : nullptr))){
+		genSuccess = Codegen::LLVM::generate(*ast);
+
+        if(!genSuccess){
             llvm::errs() << "Generating LLVM-IR failed :(\nIndividual errors displayed above\n";
             goto continu;
         }
         MEASURE_TIME_END(codegen);
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
-        if(!args.isel() && !args.regalloc() && !args.asmout() && args.output()){
+        if(args.output()){
             int ret = llvmCompileAndLinkMod(*Codegen::LLVM::moduleUP);
-            if(ret != 0){
+            if(ret != 0)
                 return ret;
-            }
-        }else if(!args.llvm()){
+
+        }else{
+			if(args.llvm())
+				Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+
             // isel
             MEASURE_TIME_START(isel);
-            Codegen::LLVM::ISel::doISel(args.isel() ? &llvmOut : nullptr);
+            Codegen::LLVM::ISel::doISel();
             MEASURE_TIME_END(isel);
             iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
 
+			if(args.isel())
+				Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+
             // regalloc
             MEASURE_TIME_START(regalloc);
-            Codegen::LLVM::RegAlloc::doRegAlloc(args.regalloc() ? &llvmOut : nullptr);
+            Codegen::LLVM::RegAlloc::doRegAlloc();
             MEASURE_TIME_END(regalloc);
             regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
+
+			if(args.regalloc())
+				Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
 
             // asm
             MEASURE_TIME_START(asm);
             (Codegen::LLVM::AssemblyGen(args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
             MEASURE_TIME_END(asm);
             asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
+
         }
     }
 continu:

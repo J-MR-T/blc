@@ -33,6 +33,12 @@ def B_PointerType : B_Type<"Pointer", "ptr"> {
   // I guess the parameters here are *type* parameters
   //let parameters = (ins );
   //let assemblyFormat = "";
+
+  /*let builders = [*/
+  /*  AttrOrTypeBuilder<(ins ), [{*/
+  /*    build($_builder, $_state);*/
+  /*  }]>*/
+  /*];*/
 }
 
 // === ops ===
@@ -77,14 +83,17 @@ def AllocaOp : B_Op<"alloca">{
     The result is the address of the allocated memory as a b.ptr.
   }];
 
-  let arguments = (ins I32Attr:$size);
+  let arguments = (ins I8Attr:$size);
 
   let results = (outs B_PointerType:$result);
 
   let builders = [
-    OpBuilder<(ins CArg<"uint32_t", "8">:$size /* default to 8 bytes, because our lang basically only needs that */ ), [{
-      build($_builder, $_state, size);
+    OpBuilder<(ins CArg<"uint8_t", "8">:$size /* default to 8 bytes, because our lang basically only needs that */ ), [{
+      build($_builder, $_state, PointerType::get($_builder.getContext()), size);
     }]>
+    /*OpBuilder<(ins "IntegerType":$type), [{*/
+    /*  build($_builder, $_state, PointerType::get($_builder.getContext()), type.getIntOrFloatBitWidth() /* or type.getWidth() ? */);*/
+    /*}]>*/
   ];
 }
 
@@ -137,12 +146,6 @@ def StoreOp : B_Op<"store">{
   let arguments = (ins B_PointerType:$ptr, I64:$value);
 
   let results = (outs);
-
-  let builders = [
-    OpBuilder<(ins "void*":$ptr, "uint64_t":$value), [{
-      build($_builder, $_state, ptr, value);
-    }]>
-  ];
 }
 
 def LoadOp : B_Op<"load">{
@@ -157,11 +160,6 @@ def LoadOp : B_Op<"load">{
 
   let results = (outs I64:$result);
 
-  let builders = [
-    OpBuilder<(ins "void*":$ptr), [{
-      build($_builder, $_state, ptr);
-    }]>
-  ];
 }
 
 #endif

@@ -7,9 +7,28 @@ using namespace mlir::b;
 
 //#include "B/BOpsDialect.cpp.inc"
 
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/DialectImplementation.h"
+#include "llvm/ADT/TypeSwitch.h"
+
+#define GET_TYPEDEF_CLASSES
+#include "B/BOpsTypes.cpp.inc"
+
+
 void BDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
+#include "B/BOps.cpp.inc"
+      >();
+
+
+  addAttributes<
+#define GET_ATTRDEF_LIST
+#include "B/BOps.cpp.inc"
+      >();
+
+  addTypes<
+#define GET_TYPEDEF_LIST
 #include "B/BOps.cpp.inc"
       >();
 }

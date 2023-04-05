@@ -1,3 +1,7 @@
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/IR/ConstantRange.h>
+#include <llvm/ADT/STLExtras.h>
+
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/Value.h>
 #include <mlir/Dialect/Traits.h>
@@ -8,8 +12,12 @@
 //#include <mlir/Dialect/ControlFlow/IR/ControlFlow.h>
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Builders.h>
+#include <mlir/IR/Dialect.h>
 
-#include "frontend.h"
+#include "B/BDialect.h"
+#include "B/BOps.h"
+#include "mlir.h"
+#include "util.h"
 
 
 /*
@@ -66,20 +74,144 @@ namespace Codegen::MLIR {
         }
     }
 
-	mlir::ModuleOp mod;
+    mlir::MLIRContext ctx;
+    mlir::ModuleOp mod;
+
     // TODO add locations
-    mlir::Location loc = mlir::UnknownLoc::get(mod.getContext());
-    mlir::Type i64 = mlir::IntegerType::get(mod.getContext(), 64);
+    mlir::Location loc = mlir::UnknownLoc::get(&ctx);
+    mlir::Type i64 = mlir::IntegerType::get(&ctx, 64);
+    mlir::func::FuncOp currentFn;
+
+    struct BasicBlockInfo{
+        bool sealed{false};
+        llvm::DenseMap<uint64_t /* variable uid */, mlir::Value> regVarmap{};
+    };
+
+    llvm::DenseMap<uint64_t /* variable uid */, mlir::b::AllocaOp> autoVarmap{};
+
+    llvm::DenseMap<mlir::Block*, BasicBlockInfo> blockInfo{};
+    llvm::DenseMap<mlir::Block*, ASTNode*> blockArgsToResolve{};
+
+    // REFACTOR: cache the result in a hash map
+    inline mlir::func::FuncOp findFunction(llvm::StringRef name){
+		mlir::func::FuncOp fn;
+		mod.walk([&](mlir::func::FuncOp func){
+			if(func.getName() == name) fn = func;
+		});
+
+		return fn;
+    }
+
+	mlir::Value varmapLookup(mlir::Block* block, ASTNode& node){
+		if(node.ident.type == IdentifierInfo::AUTO){
+			assert(autoVarmap.find(node.ident.uID) != autoVarmap.end() && "auto var not found in varmap");
+			return autoVarmap[node.ident.uID];
+		}else{
+            assert(node.ident.type == IdentifierInfo::REGISTER && "variable can only be auto or register");
+            assert(blockInfo.find(block) != blockInfo.end() && "block not found in blockInfo");
+			auto& [sealed, regVarmap] = blockInfo[block];
+
+			// try to find the variable in the current block
+			auto it = regVarmap.find(node.ident.uID);
+			if(it != regVarmap.end())
+				return it->second;
+
+			if(sealed){
+				// if the block is sealed, we know all the predecessors, so if there is a single one, query that
+				// if there are multiple ones, make a phi node/block arg and fill it now
+
+				if(auto pred = block->getSinglePredecessor()){
+					return varmapLookup(pred, node);
+                }else{
+                    auto blockArg = block->addArgument(i64, loc);
+
+                    regVarmap[node.ident.uID] = blockArg;
+
+                    for(auto pred:  block->getPredecessors()){
+						auto term = pred->getTerminator();
+                        DEBUGLOG("term: " << term << " bb: " << pred << " block: " << block << " blockArg: " << blockArg)
+                        term->setOperand(blockArg.getArgNumber(), varmapLookup(pred, node));
+                    }
+
+                    return blockArg;
+                }
+			}else{
+				// if it isn't, we *have* to have a phi node/block arg, and fill it later
+                auto blockArg = block->addArgument(i64, loc);
+
+                blockArgsToResolve[block] = &node;
+
+                return regVarmap[node.ident.uID] = blockArg;
+			}
+		}
+	}
+
+    /// just for convenience
+    /// can *only* be called with register vars, as auto vars need to be looked up in the alloca map
+    inline mlir::Value setRegisterVar(mlir::Block* block, ASTNode& node, mlir::Value val) noexcept{
+        assert(node.ident.type == IdentifierInfo::REGISTER && "can only update register vars with this method");
+
+        auto& [sealed, varmap] = blockInfo[block];
+        return varmap[node.ident.uID] = val;
+    }
+
+    inline mlir::Value setRegisterVar(mlir::OpBuilder& builder, ASTNode& node, mlir::Value val) noexcept{
+        return setRegisterVar(builder.getInsertionBlock(), node, val);
+    }
 
 	// TODO well, take care of this annoying scf.yield/return business
 
-	mlir::Value genStmts(ASTNode& blockNode, mlir::OpBuilder& builder);
+	void genStmts(ASTNode& stmtNode, mlir::OpBuilder& builder) noexcept;
+	mlir::Value genExpr(ASTNode& exprNode, mlir::OpBuilder& builder) noexcept;
 
-	mlir::Value genStmt(ASTNode& blockNode, mlir::OpBuilder& builder){
+	void genStmt(ASTNode& stmtNode, mlir::OpBuilder& builder) noexcept{
+        switch(stmtNode.type){
+        case ASTNode::Type::NStmtDecl: // always contains initializer
+            {
+            auto initializerNode = stmtNode.children[0];
+            auto initializer = genExpr(initializerNode, builder);
+            if(stmtNode.ident.type == IdentifierInfo::AUTO){
+                auto insertPoint = builder.getInsertionPoint();
+                auto insertBlock = builder.getInsertionBlock();
+                builder.setInsertionPointToStart(&currentFn.getBody().getBlocks().front());
 
-	}
+                // create alloca at start of entry block
+                auto alloca = autoVarmap[stmtNode.ident.uID] = builder.create<mlir::b::AllocaOp>(loc, 8);
 
-	mlir::Value genStmts(ASTNode& blockNode, mlir::OpBuilder& builder){
+				builder.create<mlir::b::StoreOp>(loc, alloca, initializer);
+
+                // reset insertion point
+                builder.setInsertionPoint(insertBlock, insertPoint);
+            }else{
+                setRegisterVar(builder, stmtNode, initializer);
+            }
+            break;
+            }
+        case ASTNode::Type::NStmtReturn:
+        case ASTNode::Type::NStmtBlock:
+        case ASTNode::Type::NStmtWhile:
+        case ASTNode::Type::NStmtIf:
+            break;
+            // TODO
+
+        case ASTNode::Type::NExprVar:
+        case ASTNode::Type::NExprNum:
+        case ASTNode::Type::NExprCall:
+        case ASTNode::Type::NExprUnOp:
+        case ASTNode::Type::NExprBinOp:
+        case ASTNode::Type::NExprSubscript:
+            genExpr(stmtNode, builder);
+            break;
+
+        case ASTNode::Type::NRoot:
+        case ASTNode::Type::NFunction:
+        case ASTNode::Type::NParamList:
+            assert(false);
+            break;
+        }
+    }
+
+	void genStmts(ASTNode& blockNode, mlir::OpBuilder& builder) noexcept{
 		for(auto& stmtNode : blockNode.children){
 			genStmt(stmtNode, builder);
             if(stmtNode.type == ASTNode::Type::NStmtReturn)
@@ -88,15 +220,20 @@ namespace Codegen::MLIR {
 		}
 	}
 
-	mlir::Value genExpr(ASTNode& exprNode, mlir::OpBuilder& builder){
+	mlir::Value genExpr(ASTNode& exprNode, mlir::OpBuilder& builder) noexcept{
         using namespace mlir::arith;
         using Type = Token::Type;
 
 		switch(exprNode.type){
 			case ASTNode::Type::NExprVar:
 				{
-					// TODO do ssa construction/variable lookup
-
+                auto value = varmapLookup(builder.getBlock(), exprNode);
+                if(exprNode.ident.type == IdentifierInfo::REGISTER){
+                    return value;
+                }else{
+                    assert(exprNode.ident.type == IdentifierInfo::AUTO && "variable can only be auto or register");
+                    //return builder.create<mlir::b::LoadOp>(loc, value);
+                }
 				}
 			case ASTNode::Type::NExprNum:
 				return builder.create<mlir::arith::ConstantIntOp>(loc, exprNode.value, i64);
@@ -144,10 +281,8 @@ namespace Codegen::MLIR {
                 {
 				auto childOp = genExpr(exprNode.children[0], builder);
                 switch(exprNode.op){
-                    case Type::MINUS:
-                        return builder.create<SubIOp>(loc, builder.create<ConstantIntOp>(loc, 0, i64),    childOp);
-                    case Type::TILDE:
-                        return builder.create<XOrIOp>(loc, builder.create<ConstantIntOp>(loc, -1ll, i64), childOp);
+                    case Type::MINUS: return builder.create<SubIOp>(loc, builder.create<ConstantIntOp>(loc,    0, i64), childOp);
+                    case Type::TILDE: return builder.create<XOrIOp>(loc, builder.create<ConstantIntOp>(loc, -1ll, i64), childOp);
                     case Type::LOGICAL_NOT:
                         return builder.create<ExtUIOp>(loc, i64,
                             builder.create<CmpIOp>(loc, CmpIPredicate::eq, childOp, builder.create<ConstantIntOp>(loc, 0, i64))
@@ -199,7 +334,7 @@ namespace Codegen::MLIR {
         assert(false);
 	}
 
-	mlir::func::FuncOp genFunction(ASTNode& fnNode){
+	mlir::func::FuncOp genFunction(ASTNode& fnNode) noexcept{
         mlir::OpBuilder builder(mod.getContext());
 
         auto& paramListNode = fnNode.children[0];
@@ -212,5 +347,54 @@ namespace Codegen::MLIR {
 		genStmts(bodyNode, builder);
 
         return fn;
+	}
+
+    bool generate(AST& ast) noexcept{
+        // TODO this seems to be right, but generates linker errors
+        //ctx.getOrLoadDialect<mlir::b::BDialect>();
+
+		mlir::OpBuilder builder(&ctx);
+        mod = mlir::ModuleOp::create(loc);
+
+
+        ASTNode& root = ast.root;
+
+        // declare implicitly declared functions
+        for(auto& entry: SemanticAnalysis::externalFunctionsToNumParams){
+            auto fnParamCount = entry.second;
+            llvm::SmallVector<mlir::Type, 8> params;
+            if(fnParamCount == EXTERNAL_FUNCTION_VARARGS){
+				// TODO varargs unsupported for now because mlir doesn't seem to support them
+				warn("varargs functions are not supported with the MLIR backend yet, stopping compilation");
+				return false;
+            }else{
+				// TODO something is out of bounds here apparently
+                params = llvm::SmallVector<mlir::Type, 8>(fnParamCount, i64);
+            }
+
+			builder.getFunctionType(params, i64);
+        }
+
+        // declare all functions in the file, to easily allow forward declarations
+        auto& children = root.children;
+        for(auto& fnNode : children){
+            auto paramNum = fnNode.children[0].children.size();
+            auto typelist = llvm::SmallVector<mlir::Type, 8>(paramNum, i64);
+            i64.getIntOrFloatBitWidth();
+            auto fnTy = builder.getFunctionType(typelist, i64);
+            if(findFunction(fnNode.ident.name)){
+                std::cerr << "fatal error: redefinition of function '" << fnNode.ident.name << "'\n";
+                return false;
+            }
+			builder.create<mlir::func::FuncOp>(loc, fnNode.ident.name, fnTy);
+        }
+
+		for(auto& fn: children){
+			genFunction(fn);
+		}
+
+		// TODO check for validity etc.
+
+		return true;
 	}
 };

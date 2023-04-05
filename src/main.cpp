@@ -53,7 +53,7 @@ namespace Codegen::LLVM{
     bool warningsGenerated{false};
 
     llvm::LLVMContext ctx{};
-    auto moduleUP = std::make_unique<llvm::Module>("mod", ctx);
+    unique_ptr<llvm::Module> moduleUP;
     llvm::Type* i64 = llvm::Type::getInt64Ty(ctx);
     llvm::Type* voidTy = llvm::Type::getVoidTy(ctx);
     llvm::Function* currentFunction = nullptr;
@@ -2787,6 +2787,8 @@ namespace Codegen::LLVM{
 } // namespace Codegen::LLVM::Asm
 
 int main(int argc, char *argv[]) {
+    Codegen::LLVM::moduleUP = std::make_unique<llvm::Module>("mod", Codegen::LLVM::ctx);
+
     // TODO check https://www.llvm.org/docs/Frontend/PerformanceTips.html at some point
 #define MEASURE_TIME_START(point) auto point ## _start = std::chrono::high_resolution_clock::now()
 

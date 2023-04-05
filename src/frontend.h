@@ -1,3 +1,5 @@
+#pragma once
+
 #pragma GCC diagnostic push 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wcomment"
@@ -174,7 +176,7 @@ public:
     static int nodeCounter; // initialized to 0
     uint64_t nodeID = nodeCounter++;
 
-    /// maps the type of a node to the number of children it should have, used for validation. -n with n>1 means at least (n-1) children -> for example -1 means 0 or more children (any number)
+    /// maps the type of a node to the number of children it should have, used for validation. n with n>=0 means exactly n children. -n with n>1 means at least (n-1) children -> for example -1 means 0 or more children (any number)
     static const InsertOnceQueryAfterwardsMap<ASTNode::Type, int> numberOfChildren;
     static const InsertOnceQueryAfterwardsMap<ASTNode::Type, std::string> nodeTypeToDotIdentifier;
     static const InsertOnceQueryAfterwardsMap<ASTNode::Type, llvm::SmallVector<std::string,4>> nodeTypeToDotStyling;

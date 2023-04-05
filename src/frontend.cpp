@@ -335,7 +335,7 @@ const InsertOnceQueryAfterwardsMap<ASTNode::Type, int> ASTNode::numberOfChildren
     {ASTNode::Type::NStmtReturn,    -1},
     {ASTNode::Type::NStmtBlock,     -1},
     {ASTNode::Type::NStmtWhile,      2},
-    {ASTNode::Type::NStmtIf,        -1},
+    {ASTNode::Type::NStmtIf,        -3}, // -3 == at least 2 children
     {ASTNode::Type::NExprVar,        0},
     {ASTNode::Type::NExprNum,        0},
     {ASTNode::Type::NExprCall,      -1},
@@ -455,13 +455,15 @@ size_t AST::getRoughMemoryFootprint() {
 bool AST::validate() {
     bool valid = true;
     root.iterateChildren([&valid](ASTNode& node) {
-        auto number = ASTNode::numberOfChildren[node.type];
-        if (number > 0 && node.children.size() != static_cast<size_t>(number)) {
-            std::cerr << "Node " << node.uniqueDotIdentifier() << " has " << node.children.size() << " children, but should have " << number << "\n";
-            valid = false;
+        auto exactNumber = ASTNode::numberOfChildren[node.type];
+        if (exactNumber >= 0) {
+            if(node.children.size() != static_cast<size_t>(exactNumber)){
+                std::cerr << "Node " << node.uniqueDotIdentifier() << " has " << node.children.size() << " children, but should have " << exactNumber << "\n";
+                valid = false;
+            }
         }else{
-            auto atLeast = number-1;
-            if(node.children.size() < static_cast<size_t>(atLeast)){
+            size_t atLeast = (-exactNumber) - 1;
+            if(node.children.size() < atLeast){
                 std::cerr << "Node " << node.uniqueDotIdentifier() << " has " << node.children.size() << " children, but should have at least " << atLeast << "\n";
                 valid = false;
             }

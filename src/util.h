@@ -38,6 +38,7 @@ using namespace std::literals::string_literals;
 #define STRINGIZE(x) #x
 #define STRINGIZE_MACRO(x) STRINGIZE(x)
 
+
 // kind of an enum class but implicitly convertible to int
 namespace ExitCode{
 enum {
@@ -105,7 +106,7 @@ namespace ArgParse{
         const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
-        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o.\n", false, true};
+        const Arg llvm{      "l", "llvm"      , 0, "Print LLVM IR if used without -o. Compiles to object file and links to executable if used with -o."  , false, true};
         const Arg nowarn{    "w", "nowarn"    , 0, "Do not generate warnings during the LLVM codegeneration phase"                                       , false, true};
         const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
         const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
@@ -116,7 +117,7 @@ namespace ArgParse{
 
         const Arg sentinel{"", "", 0, "", false, false};
 
-        const Arg* const all[13] = {&help, &input, &dot, &output, &preprocess, &url, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &sentinel};
+        const Arg* const all[14] = {&help, &input, &dot, &output, &preprocess, &url, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &mlir, &sentinel};
         
         // iterator over all
         const Arg* begin() const{
@@ -124,7 +125,7 @@ namespace ArgParse{
         }
 
         const Arg* end() const{
-            return all[12];
+            return all[13];
         }
     } args;
 

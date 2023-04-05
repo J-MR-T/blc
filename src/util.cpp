@@ -63,7 +63,7 @@ void printHelp(const char *argv0) {
         << "  " << argv0 << " input.b -du\n"
         << "  " << argv0 << " -lE input.b\n"
         << "  " << argv0 << " -l main.b main\n"
-        << "  " << argv0 << " -ls input.b\n"
+        << "  " << argv0 << " -s input.b\n"
         << "  " << argv0 << " -sr input.b\n"
         << "  " << argv0
         << " -a bSamples/asm/addressCalculations.b | aarch64-linux-gnu-gcc "

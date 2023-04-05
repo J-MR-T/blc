@@ -48,6 +48,7 @@
 
 #include "util.h"
 #include "frontend.h"
+#include "mlir.h"
 
 namespace Codegen::LLVM{
     bool warningsGenerated{false};
@@ -143,7 +144,7 @@ namespace Codegen::LLVM{
     }
 
     // automatically creates phi nodes on demand
-    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept {
+    llvm::Value* varmapLookup(llvm::BasicBlock* block, ASTNode& node) noexcept{
         uint64_t uID = node.ident.uID;
         if(node.ident.type == IdentifierInfo::AUTO){
             assert(autoVarmap.find(uID) != autoVarmap.end() && "auto var not found in varmap");
@@ -188,7 +189,7 @@ namespace Codegen::LLVM{
                 }
                 llvm::PHINode* phi = irb.CreatePHI(i64, 2, node.ident.name); // num reserved values here is only a hint, 0 is fine "[...] if you really have no idea", it's at least one because of our algo
                 phisToResolve[phi] = &node;
-                
+
                 // incoming values/blocks get added by fillPHIs later
                 return varmap[uID] = phi;
             }
@@ -197,15 +198,15 @@ namespace Codegen::LLVM{
 
     /// just for convenience
     /// can *only* be called with register vars, as auto vars need to be looked up in the alloca map
-    inline llvm::Value* updateVarmap(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
+    inline llvm::Value* setRegisterVar(llvm::BasicBlock* block, ASTNode& node, llvm::Value* val) noexcept{
         assert(node.ident.type == IdentifierInfo::REGISTER && "can only update register vars with this method");
 
         auto& [sealed, varmap] = blockInfo[block];
         return varmap[node.ident.uID] = val;
     }
 
-    inline llvm::Value* updateVarmap(llvm::IRBuilder<>& irb, ASTNode& node, llvm::Value* val) noexcept{
-        return updateVarmap(irb.GetInsertBlock(), node, val);
+    inline llvm::Value* setRegisterVar(llvm::IRBuilder<>& irb, ASTNode& node, llvm::Value* val) noexcept{
+        return setRegisterVar(irb.GetInsertBlock(), node, val);
     }
 
     // fills phi nodes with correct values, assumes block is sealed
@@ -216,7 +217,7 @@ namespace Codegen::LLVM{
             }
         }
     }
-    
+
     // Seals the block and fills phis
     inline void sealBlock(llvm::BasicBlock* block){
         auto& [sealed, varmap] = blockInfo[block];
@@ -393,7 +394,7 @@ namespace Codegen::LLVM{
 						// in rhs: value to assign to it
 						assert(lhsNode.ident.type == IdentifierInfo::REGISTER && "if lhs is not AUTO, it has to be REGISTER");
 
-						updateVarmap(irb, lhsNode, rhs);
+						setRegisterVar(irb, lhsNode, rhs);
 					}
 					return rhs; // just as before, return the result, not the store/assign/etc.
 				}
@@ -495,7 +496,7 @@ namespace Codegen::LLVM{
 
 					autoVarmap[stmtNode.ident.uID] = alloca;
 				}else if(stmtNode.ident.type == IdentifierInfo::REGISTER){
-					updateVarmap(irb, stmtNode, initializer);
+					setRegisterVar(irb, stmtNode, initializer);
 				}else{
 					assert(false && "Invalid identifier type");
 				}
@@ -645,7 +646,7 @@ namespace Codegen::LLVM{
             llvm::Argument* arg = fn->getArg(i);
             auto& name = fnNode.children[0].children[i].ident.name;
             arg->setName(name);
-            updateVarmap(irb, fnNode.children[0].children[i], arg);
+            setRegisterVar(irb, fnNode.children[0].children[i], arg);
         }
 
         auto& blockNode = fnNode.children[1];
@@ -2220,7 +2221,6 @@ namespace Codegen::LLVM::RegAlloc{
 
                             call->replaceUsesOfWith(op, newOp);
                         }else{
-                            DEBUGLOG(irb.GetInsertBlock()->getName() << ": rewriting instruction: " << *call << " with operand " << *op << ", which is on stack position " << (allocator.spillMap[op].offset << 3));
                             allocator.tryGetAndRewriteInstruction(call, op);
                         }
 
@@ -2895,13 +2895,14 @@ int main(int argc, char *argv[]) {
 		}
 
 		if(args.mlir()){
+            DEBUGLOG("TEST");
 			// TODO
-			// genSuccess = Codegen::MLIR::generate()
+			genSuccess = Codegen::MLIR::generate(*ast);
 
 			if(args.output()){
 				// TODO mlir mod -> llvm mod -> binary
 			}else{
-				// TODO print mlir mod to llvmOut
+				Codegen::MLIR::mod.print(llvmOut);
 			}
 			goto continu;
 		}

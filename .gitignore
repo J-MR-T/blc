@@ -3,6 +3,7 @@
 compile_commands.json
 main
 blc
+out
 .cache/**
 build/**
 tests/Output/**

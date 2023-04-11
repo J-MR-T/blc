@@ -1,5 +1,5 @@
-// RUN: not %blc -n %s 2>&1 | FileCheck %s --check-prefix=CHECK-PARSE 
-// RUN: not %blc -n %s 2>&1 | FileCheck %s --check-prefix=CHECK-SEMA
+// RUN: not %blc %s 2>&1 | FileCheck %s --check-prefix=CHECK-PARSE 
+// RUN: not %blc %s 2>&1 | FileCheck %s --check-prefix=CHECK-SEMA
     //hello
     gauss(x) {
         registr res = -0; //wrong

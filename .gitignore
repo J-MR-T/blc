@@ -1,6 +1,6 @@
 
 
-compile_commands.json
+*compile_commands.*
 main
 blc
 out
@@ -12,4 +12,4 @@ doc
 
 hw*.txt
 
-Session.vim
+**/*.vim

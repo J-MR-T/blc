@@ -2822,7 +2822,8 @@ int main(int argc, char *argv[]) {
     std::string preprocessedFilePath;
 
     auto epochsecs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(); //cpp moment
-    if(args.preprocess()){
+    bool preprocess = !args.noCpp();
+    if(preprocess){
         preprocessedFilePath="/tmp/" + std::to_string(epochsecs) + ".bpreprocessed";
         execute("cpp", "-E", "-P", *args.input, "-o", preprocessedFilePath);
 
@@ -2840,7 +2841,7 @@ int main(int argc, char *argv[]) {
     }
     MEASURE_TIME_END(parse);
 
-    if(args.preprocess())
+    if(preprocess)
         std::filesystem::remove(preprocessedFilePath);
 
     MEASURE_TIME_START(semanalyze);

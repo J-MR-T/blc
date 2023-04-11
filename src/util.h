@@ -23,7 +23,7 @@ using std::unique_ptr;
 using namespace std::literals::string_literals;
 
 #ifndef NDEBUG
-#define DEBUGLOG(x) llvm::errs() << x << "\n"; fflush(stderr);
+#define DEBUGLOG(x) do { llvm::errs() << x << "\n"; fflush(stderr); } while(0)
 #define IFDEBUG(x) x
 #define IFDEBUGELSE(x, y) x
 
@@ -102,7 +102,7 @@ namespace ArgParse{
         const Arg input{     "i", "input"     , 1, "Input file"                                                                                          ,  true, false};
         const Arg dot{       "d", "dot"       , 0, "Output AST in GraphViz DOT format"                                                                   , false, true};
         const Arg output{    "o", "output"    , 2, "Compile and link to output file supplied here, using LLVM by default, or MLIR if -m is set"          , false, false};
-        const Arg preprocess{"E", "preprocess", 0, "Run the C preprocessor on the input file before parsing it"                                          , false, true};
+        const Arg noCpp{"n", "nocpp"          , 0, "Do *not* run the C preprocessor on the input file before parsing it"                                 , false, true};
         const Arg url{       "u", "url"       , 0, "Instead of printing the AST in DOT format to the console, print a URL to visualize it in the browser", false, true};
         const Arg benchmark{ "b", "benchmark" , 0, "Measure execution time and print memory footprint"                                                   , false, true};
         const Arg iterations{"" , "iterations", 0, "Number of iterations to run the benchmark for (default 1, requires -b)"                              , false, false};
@@ -113,11 +113,12 @@ namespace ArgParse{
         const Arg asmout{    "a", "asm"       , 0, "Output (ARM-) assembly"                                                                              , false, true};
 		const Arg mlir{      "m", "mlir"      , 0, "Print MLIR if used without -o. Compiles to object file and links to executable if used with -o.\n"
                                                    "Disables the rest of the compilation process"                                                        , false, true};
+        const Arg interpret{ "x", "execute"   , 0, "Execute the generated LLVM module immediately."                                                      , false, true};
 
 
         const Arg sentinel{"", "", 0, "", false, false};
 
-        const Arg* const all[14] = {&help, &input, &dot, &output, &preprocess, &url, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &mlir, &sentinel};
+        const Arg* const all[15] = {&help, &input, &dot, &output, &noCpp, &url, &benchmark, &iterations, &llvm, &nowarn, &isel, &regalloc, &mlir, &interpret, &sentinel};
         
         // iterator over all
         const Arg* begin() const{
@@ -125,7 +126,7 @@ namespace ArgParse{
         }
 
         const Arg* end() const{
-            return all[13];
+            return all[14];
         }
     } args;
 

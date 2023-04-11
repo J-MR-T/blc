@@ -1,7 +1,6 @@
 #LLVM_BUILD_DIR=~/programming/Libs/Cpp/clang+llvm-15.0.2-x86_64-unknown-linux-gnu
-# TODO make this modular
-#LLVM_BUILD_DIR=~/programming/Libs/Cpp/llvm-project/buildSchlepptop
-LLVM_BUILD_DIR=~/programming/Libs/Cpp/llvm-project/buildApoc
+# override this using env var or directly in the Makefile
+LLVM_BUILD_DIR=~/programming/Libs/Cpp/llvm-project/build
 
 .phony: release debug makeCMakeBearable clean setup test
 

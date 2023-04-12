@@ -30,15 +30,6 @@ def B_PointerType : B_Type<"Pointer", "ptr"> {
   let summary = "pointer type";
   let description = "A pointer type is a type that points to a memory location";
 
-  // I guess the parameters here are *type* parameters
-  //let parameters = (ins );
-  //let assemblyFormat = "";
-
-  /*let builders = [*/
-  /*  AttrOrTypeBuilder<(ins ), [{*/
-  /*    build($_builder, $_state);*/
-  /*  }]>*/
-  /*];*/
 }
 
 // === ops ===
@@ -97,7 +88,7 @@ def AllocaOp : B_Op<"alloca">{
   ];
 }
 
-def PtrToInt : B_Op<"ptrtoint">{
+def PtrToIntOp : B_Op<"ptrtoint">{
   let summary = "operation to convert a pointer to an integer";
 
   let description = [{
@@ -110,13 +101,13 @@ def PtrToInt : B_Op<"ptrtoint">{
   let results = (outs I64:$result);
 
   let builders = [
-    OpBuilder<(ins "void*":$ptr), [{
-      build($_builder, $_state, ptr);
+    OpBuilder<(ins "Value":$ptr), [{
+      build($_builder, $_state, PointerType::get($_builder.getContext()), ptr);
     }]>
   ];
 }
 
-def IntToPtr : B_Op<"inttoptr">{
+def IntToPtrOp : B_Op<"inttoptr">{
   let summary = "operation to convert an integer to a pointer";
 
   let description = [{
@@ -129,8 +120,8 @@ def IntToPtr : B_Op<"inttoptr">{
   let results = (outs B_PointerType:$result);
 
   let builders = [
-    OpBuilder<(ins "uint64_t":$intt), [{
-      build($_builder, $_state, intt);
+    OpBuilder<(ins "Value":$intt), [{
+      build($_builder, $_state, PointerType::get($_builder.getContext()), intt);
     }]>
   ];
 }
@@ -160,6 +151,11 @@ def LoadOp : B_Op<"load">{
 
   let results = (outs I64:$result);
 
+  let builders = [
+    OpBuilder<(ins "Value":$ptr), [{
+      build($_builder, $_state, IntegerType::get($_builder.getContext(), 64), ptr);
+    }]>
+  ];
 }
 
 #endif

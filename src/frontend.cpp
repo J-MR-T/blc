@@ -341,7 +341,7 @@ const InsertOnceQueryAfterwardsMap<ASTNode::Type, int> ASTNode::numberOfChildren
     {ASTNode::Type::NExprCall,      -1},
     {ASTNode::Type::NExprUnOp,       1},
     {ASTNode::Type::NExprBinOp,      2},
-    {ASTNode::Type::NExprSubscript,  3},
+    {ASTNode::Type::NExprSubscript,  2},
 }};
 
 const InsertOnceQueryAfterwardsMap<ASTNode::Type, std::string> ASTNode::nodeTypeToDotIdentifier{{
@@ -620,36 +620,35 @@ ASTNode Parser::parsePrimaryExpression(){
 
 ASTNode Parser::parseSubscript(ASTNode&& lhs){
     auto expr = parseExpr();
-    std::optional<ASTNode> numOpt; // so this can be declared without being initialized
+	int num = 8;
     if(tok.matchToken(Token::Type::AT)){
         // has to be followed by number
         tok.assertToken(Token::Type::NUM, false);
 
         // parse sizespec as number, validate it's 1/2/4/8
-        numOpt = parsePrimaryExpression();
-        auto& num = numOpt.value();
+		auto numNode = parsePrimaryExpression(); // can't be bothered to reimplement it here ^^
+
+		num = numNode.value;
         if(
             !(
-                num.value==1 ||
-                num.value==2 ||
-                num.value==4 ||
-                num.value==8
+                num==1 ||
+                num==2 ||
+                num==4 ||
+                num==8
              )
         ){
             throw ParsingException("Line " +std::to_string(tok.getLineNum())+": Expression containing " + expr.toString() + " was followed by @, but @ wasn't followed by 1/2/4/8");
         }
-    }else{
-        numOpt = ASTNode(ASTNode::Type::NExprNum);
-        auto& num = numOpt.value();
-        num.value = 8; //8 by default
     }
 
     tok.assertToken(Token::Type::R_BRACKET);
 
     auto subscript = ASTNode(ASTNode::Type::NExprSubscript, {
-    std::move(lhs),
-    std::move(expr),
-    std::move(numOpt.value())});
+		std::move(lhs),
+		std::move(expr)
+	});
+	subscript.value = num;
+
     return subscript;
 }
 

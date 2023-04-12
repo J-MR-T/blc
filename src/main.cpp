@@ -225,8 +225,7 @@ namespace Codegen::LLVM{
         fillPHIs(block);
     }
 
-    llvm::Type* sizespecToLLVMType(ASTNode& sizespecNode, llvm::IRBuilder<>& irb){
-        auto sizespecInt = sizespecNode.value;
+    llvm::Type* sizespecToLLVMType(int sizespecInt, llvm::IRBuilder<>& irb){
         if(sizespecInt == 1){
             return irb.getInt8Ty();
         }else if(sizespecInt == 2){
@@ -272,42 +271,42 @@ namespace Codegen::LLVM{
                 }
             case ASTNode::Type::NExprUnOp:
                 {
-				auto& operandNode = exprNode.children[0];
-				switch(exprNode.op){
-					// can be TILDE, MINUS, AMPERSAND, LOGICAL_NOT
-					case Token::Type::TILDE: return irb.CreateNot(genExpr(operandNode, irb)); // creates an all-ones XOR
-					case Token::Type::MINUS: return irb.CreateNeg(genExpr(operandNode, irb)); // creates a sub with 0 as first op
-					case Token::Type::LOGICAL_NOT:
-						{
-						auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_EQ, genExpr(operandNode, irb), irb.getInt64(0));
-						return irb.CreateZExt(cmp, i64);
-						}
-					case Token::Type::AMPERSAND:
-						// get the ptr to the alloca then cast that to an int, because everything (except the auto vars stored in the varmap) is an i64
-						if(operandNode.type == ASTNode::Type::NExprVar){
-							auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode);
-							return irb.CreatePtrToInt(ptr, i64);
-						}else{ /* has to be a subscript in this case, because of the SemanticAnalysis constraints */
-							assert(operandNode.type == ASTNode::Type::NExprSubscript && "got a & operator on something that isn't a variable or a subscript");
+                auto& operandNode = exprNode.children[0];
+                switch(exprNode.op){
+                    // can be TILDE, MINUS, AMPERSAND, LOGICAL_NOT
+                    case Token::Type::TILDE: return irb.CreateNot(genExpr(operandNode, irb)); // creates an all-ones XOR
+                    case Token::Type::MINUS: return irb.CreateNeg(genExpr(operandNode, irb)); // creates a sub with 0 as first op
+                    case Token::Type::LOGICAL_NOT:
+                        {
+                        auto cmp = irb.CreateICmp(llvm::CmpInst::ICMP_EQ, genExpr(operandNode, irb), irb.getInt64(0));
+                        return irb.CreateZExt(cmp, i64);
+                        }
+                    case Token::Type::AMPERSAND:
+                        // get the ptr to the alloca then cast that to an int, because everything (except the auto vars stored in the varmap) is an i64
+                        if(operandNode.type == ASTNode::Type::NExprVar){
+                            auto ptr = varmapLookup(irb.GetInsertBlock(), operandNode);
+                            return irb.CreatePtrToInt(ptr, i64);
+                        }else{ /* has to be a subscript in this case, because of the SemanticAnalysis constraints */
+                            assert(operandNode.type == ASTNode::Type::NExprSubscript && "got a & operator on something that isn't a variable or a subscript");
 
-							// REFACTOR: would be nice to merge this with the code for loading from subscripts at some point, its almost the same
-							auto& addrNode     = operandNode.children[0];
-							auto& indexNode    = operandNode.children[1];
-							auto& sizespecNode = operandNode.children[2];
+                            // REFACTOR: would be nice to merge this with the code for loading from subscripts at some point, its almost the same
+                            auto& addrNode     = operandNode.children[0];
+                            auto& indexNode    = operandNode.children[1];
+                            auto sizespec      = exprNode.value;
 
-							auto addr = genExpr(addrNode, irb); 
-							auto addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
+                            auto addr = genExpr(addrNode, irb); 
+                            auto addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
 
-							auto index = genExpr(indexNode, irb);
+                            auto index = genExpr(indexNode, irb);
 
-							llvm::Type* type = sizespecToLLVMType(sizespecNode, irb);
-							auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
+                            llvm::Type* type = sizespecToLLVMType(sizespec, irb);
+                            auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
 
-							return irb.CreatePtrToInt(getelementpointer, i64);
-						}
-					default:
-						throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as unary operator");
-				}
+                            return irb.CreatePtrToInt(getelementpointer, i64);
+                        }
+                    default:
+                        throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as unary operator");
+                }
                 }
             case ASTNode::Type::NExprBinOp:
                 {
@@ -318,126 +317,126 @@ namespace Codegen::LLVM{
 
 #define ICAST(irb, x) irb.CreateIntCast((x), i64, false) // unsigned cast because we want 0 for false and 1 for true (instead of -1)
 
-				// 2 edge cases: assignment, and short circuiting logical ops:
-				// short circuiting logical ops: conditional evaluation
+                // 2 edge cases: assignment, and short circuiting logical ops:
+                // short circuiting logical ops: conditional evaluation
 
-				// can get preds using: llvm::pred_begin()/ llvm::predecessors()
-				if(bool isAnd = exprNode.op == Token::Type::LOGICAL_AND; isAnd || exprNode.op == Token::Type::LOGICAL_OR){
-					// we need to generate conditional branches in these cases, clang does it the same way
-					// but the lhs is always evaluated anyway, so we can just do that first
-					auto lhs = genExpr(lhsNode, irb);
-					auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                // can get preds using: llvm::pred_begin()/ llvm::predecessors()
+                if(bool isAnd = exprNode.op == Token::Type::LOGICAL_AND; isAnd || exprNode.op == Token::Type::LOGICAL_OR){
+                    // we need to generate conditional branches in these cases, clang does it the same way
+                    // but the lhs is always evaluated anyway, so we can just do that first
+                    auto lhs = genExpr(lhsNode, irb);
+                    auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
 
-					auto startBB = irb.GetInsertBlock();
-					auto evRHS = llvm::BasicBlock::Create(ctx, "evRHS", currentFunction);
-					auto cont = llvm::BasicBlock::Create(ctx, "shortCircuitCont", currentFunction);
+                    auto startBB = irb.GetInsertBlock();
+                    auto evRHS = llvm::BasicBlock::Create(ctx, "evRHS", currentFunction);
+                    auto cont = llvm::BasicBlock::Create(ctx, "shortCircuitCont", currentFunction);
 
-					if(isAnd)
-						// for an and, we need to evaluate the other side iff its true
-						irb.CreateCondBr(lhsi1, evRHS, cont);
-					else
-						// for an or, we need to evaluate the other side iff its false
-						irb.CreateCondBr(lhsi1, cont, evRHS);
+                    if(isAnd)
+                        // for an and, we need to evaluate the other side iff its true
+                        irb.CreateCondBr(lhsi1, evRHS, cont);
+                    else
+                        // for an or, we need to evaluate the other side iff its false
+                        irb.CreateCondBr(lhsi1, cont, evRHS);
 
-					// create phi node *now*, because blocks might be split/etc. later
-					irb.SetInsertPoint(cont);
-					auto phi = irb.CreatePHI(irb.getInt1Ty(), 2);
-					phi->addIncoming(irb.getInt1(!isAnd), startBB); // if we skipped (= short circuited), we know that the value is false if it was an and, true otherwise
+                    // create phi node *now*, because blocks might be split/etc. later
+                    irb.SetInsertPoint(cont);
+                    auto phi = irb.CreatePHI(irb.getInt1Ty(), 2);
+                    phi->addIncoming(irb.getInt1(!isAnd), startBB); // if we skipped (= short circuited), we know that the value is false if it was an and, true otherwise
 
-					auto& [rhsSealed, rhsVarmap] = blockInfo[evRHS];
-					rhsSealed = true;
-					// don't need to fill phi's for RHS later, because it cant generate phis: is sealed, and has single parent
+                    auto& [rhsSealed, rhsVarmap] = blockInfo[evRHS];
+                    rhsSealed = true;
+                    // don't need to fill phi's for RHS later, because it cant generate phis: is sealed, and has single parent
 
-					// var map is queried recursively anyway, would be a waste to copy it here
+                    // var map is queried recursively anyway, would be a waste to copy it here
 
-					irb.SetInsertPoint(evRHS);
-					auto rhs = genExpr(rhsNode, irb);
-					auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0));
-					auto& compResult = rhsi1;
-					irb.CreateBr(cont);
+                    irb.SetInsertPoint(evRHS);
+                    auto rhs = genExpr(rhsNode, irb);
+                    auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0));
+                    auto& compResult = rhsi1;
+                    irb.CreateBr(cont);
 
-					auto& [contSealed, contVarmap] = blockInfo[cont];
-					contSealed = true;
-					// we don't need to fill the phis of this block either, because it is sealed basically from the beginning, thus any phi nodes generated are complete already
+                    auto& [contSealed, contVarmap] = blockInfo[cont];
+                    contSealed = true;
+                    // we don't need to fill the phis of this block either, because it is sealed basically from the beginning, thus any phi nodes generated are complete already
 
-					auto rhsParentBlock = irb.GetInsertBlock();
-					phi->addIncoming(compResult, rhsParentBlock); // otherwise, if we didnt skip, we need to know what the rhs evaluated to
+                    auto rhsParentBlock = irb.GetInsertBlock();
+                    phi->addIncoming(compResult, rhsParentBlock); // otherwise, if we didnt skip, we need to know what the rhs evaluated to
 
-					irb.SetInsertPoint(cont);
+                    irb.SetInsertPoint(cont);
 
-					return ICAST(irb, phi);
-				};
+                    return ICAST(irb, phi);
+                };
 
-				// assignment needs special handling:
-				// before this switch and CRUCIALLY (!!!) before the lhs gets evaluated, check if exprNode.op is an assign and if the left hand side is a subscript. in that case, we need to generate a store instruction for the assignment
-				//  we also need to generate a store, if the lhs is an auto variable
-				auto rhs = genExpr(rhsNode, irb);
-				if(exprNode.op == Token::Type::ASSIGN){
-					if(lhsNode.type == ASTNode::Type::NExprSubscript){
-						auto addr = genExpr(lhsNode.children[0], irb);
-						auto index = genExpr(lhsNode.children[1], irb);
-						auto& sizespecNode = lhsNode.children[2];
+                // assignment needs special handling:
+                // before this switch and CRUCIALLY (!!!) before the lhs gets evaluated, check if exprNode.op is an assign and if the left hand side is a subscript. in that case, we need to generate a store instruction for the assignment
+                //  we also need to generate a store, if the lhs is an auto variable
+                auto rhs = genExpr(rhsNode, irb);
+                if(exprNode.op == Token::Type::ASSIGN){
+                    if(lhsNode.type == ASTNode::Type::NExprSubscript){
+                        auto addr     = genExpr(lhsNode.children[0], irb);
+                        auto index    = genExpr(lhsNode.children[1], irb);
+                        auto sizespec = exprNode.value;
 
-						llvm::Type* type = sizespecToLLVMType(sizespecNode, irb);
-						// first cast, then store, so that the right amount is stored
-						// this could be done with a trunc, but that is only allowed if the type is strictly smaller, the CreateIntCast distinguishes these cases and takes care of it for us
-						auto cast = irb.CreateIntCast(rhs, type, true);
+                        llvm::Type* type = sizespecToLLVMType(sizespec, irb);
+                        // first cast, then store, so that the right amount is stored
+                        // this could be done with a trunc, but that is only allowed if the type is strictly smaller, the CreateIntCast distinguishes these cases and takes care of it for us
+                        auto cast = irb.CreateIntCast(rhs, type, true);
 
-						auto addrPtr = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
+                        auto addrPtr = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
 
-						auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
-						irb.CreateStore(cast, getelementpointer);
-					}else if(/* lhs node has to be var if we're here */ lhsNode.ident.type == IdentifierInfo::AUTO){
-						irb.CreateStore(rhs, varmapLookup(irb.GetInsertBlock(), lhsNode));
-					}else{/* in this case it has to be a register variable */
-						// in lhs: "old" varname of the var we're assigning to -> update mapping
-						// in rhs: value to assign to it
-						assert(lhsNode.ident.type == IdentifierInfo::REGISTER && "if lhs is not AUTO, it has to be REGISTER");
+                        auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
+                        irb.CreateStore(cast, getelementpointer);
+                    }else if(/* lhs node has to be var if we're here */ lhsNode.ident.type == IdentifierInfo::AUTO){
+                        irb.CreateStore(rhs, varmapLookup(irb.GetInsertBlock(), lhsNode));
+                    }else{/* in this case it has to be a register variable */
+                        // in lhs: "old" varname of the var we're assigning to -> update mapping
+                        // in rhs: value to assign to it
+                        assert(lhsNode.ident.type == IdentifierInfo::REGISTER && "if lhs is not AUTO, it has to be REGISTER");
 
-						setRegisterVar(irb, lhsNode, rhs);
-					}
-					return rhs; // just as before, return the result, not the store/assign/etc.
-				}
-				auto lhs = genExpr(lhsNode, irb);
+                        setRegisterVar(irb, lhsNode, rhs);
+                    }
+                    return rhs; // just as before, return the result, not the store/assign/etc.
+                }
+                auto lhs = genExpr(lhsNode, irb);
 
-				// for all other cases this is a post order traversal of the epxr tree
+                // for all other cases this is a post order traversal of the epxr tree
 
-				switch(exprNode.op){
-					case Token::Type::BITWISE_OR:    return irb.CreateOr(lhs,rhs);
-					case Token::Type::BITWISE_XOR:   return irb.CreateXor(lhs,rhs);
-					case Token::Type::AMPERSAND:     return irb.CreateAnd(lhs,rhs);
-					case Token::Type::PLUS:          return irb.CreateAdd(lhs,rhs);
-					case Token::Type::MINUS:         return irb.CreateSub(lhs,rhs);
-					case Token::Type::TIMES:         return irb.CreateMul(lhs,rhs);
-					case Token::Type::DIV:           return irb.CreateSDiv(lhs,rhs);
-					case Token::Type::MOD:           return irb.CreateSRem(lhs,rhs);
-					case Token::Type::SHIFTL:        return irb.CreateShl(lhs,rhs);
-					case Token::Type::SHIFTR:        return irb.CreateAShr(lhs,rhs);
+                switch(exprNode.op){
+                    case Token::Type::BITWISE_OR:    return irb.CreateOr(lhs,rhs);
+                    case Token::Type::BITWISE_XOR:   return irb.CreateXor(lhs,rhs);
+                    case Token::Type::AMPERSAND:     return irb.CreateAnd(lhs,rhs);
+                    case Token::Type::PLUS:          return irb.CreateAdd(lhs,rhs);
+                    case Token::Type::MINUS:         return irb.CreateSub(lhs,rhs);
+                    case Token::Type::TIMES:         return irb.CreateMul(lhs,rhs);
+                    case Token::Type::DIV:           return irb.CreateSDiv(lhs,rhs);
+                    case Token::Type::MOD:           return irb.CreateSRem(lhs,rhs);
+                    case Token::Type::SHIFTL:        return irb.CreateShl(lhs,rhs);
+                    case Token::Type::SHIFTR:        return irb.CreateAShr(lhs,rhs);
 
-					case Token::Type::LESS:          return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs));
-					case Token::Type::GREATER:       return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs));
-					case Token::Type::LESS_EQUAL:    return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs));
-					case Token::Type::GREATER_EQUAL: return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs));
-					case Token::Type::EQUAL:         return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs));
-					case Token::Type::NOT_EQUAL:     return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs));
-					/* non-short circuiting variants of the logical ops
-					case Token::Type::LOGICAL_AND:
-						{
-							// These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
-							// but because of the C like semantics, we need to zext them back to i64 afterwards
-							auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-							auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-							return ICAST(irb,irb.CreateLogicalAnd(lhsi1,rhsi1)); // i have no idea how this works, cant find a 'logical and' instruction...
-						}
-					case Token::Type::LOGICAL_OR:
-						{
-							// These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
-							// but because of the C like semantics, we need to zext them back to i64 afterwards
-							auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-							auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
-							return ICAST(irb,irb.CreateLogicalOr(lhsi1,rhsi1)); // i have no idea how this works, cant find a 'logical or' instruction...
-						}
-						*/
+                    case Token::Type::LESS:          return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLT, lhs, rhs));
+                    case Token::Type::GREATER:       return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGT, lhs, rhs));
+                    case Token::Type::LESS_EQUAL:    return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SLE, lhs, rhs));
+                    case Token::Type::GREATER_EQUAL: return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_SGE, lhs, rhs));
+                    case Token::Type::EQUAL:         return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_EQ, lhs, rhs));
+                    case Token::Type::NOT_EQUAL:     return ICAST(irb,irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, rhs));
+                    /* non-short circuiting variants of the logical ops
+                    case Token::Type::LOGICAL_AND:
+                        {
+                            // These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
+                            // but because of the C like semantics, we need to zext them back to i64 afterwards
+                            auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                            auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                            return ICAST(irb,irb.CreateLogicalAnd(lhsi1,rhsi1)); // i have no idea how this works, cant find a 'logical and' instruction...
+                        }
+                    case Token::Type::LOGICAL_OR:
+                        {
+                            // These instrs expect an i1 for obvious reasons, but we have i64s, so we need to convert them here
+                            // but because of the C like semantics, we need to zext them back to i64 afterwards
+                            auto lhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, lhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                            auto rhsi1 = irb.CreateICmp(llvm::CmpInst::ICMP_NE, rhs, irb.getInt64(0)); // if its != 0, then it's true/1, otherwise false/0
+                            return ICAST(irb,irb.CreateLogicalOr(lhsi1,rhsi1)); // i have no idea how this works, cant find a 'logical or' instruction...
+                        }
+                        */
 #undef ICAST
 					default:
 						throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as binary operator");
@@ -445,20 +444,19 @@ namespace Codegen::LLVM{
                 }
             case ASTNode::Type::NExprSubscript:
                 {
-				// this can *ONLY* be a "load" (getelementpointer) subscript, store has been handled in the special case for assignments above
-				assert(exprNode.children.size() == 3 && "Subscript load expression must have 3 children");
+                // this can *ONLY* be a "load" (getelementpointer) subscript, store has been handled in the special case for assignments above
 
-				auto& addrNode     = exprNode.children[0];
-				auto& indexNode    = exprNode.children[1];
-				auto& sizespecNode = exprNode.children[2];
+                auto& addrNode     = exprNode.children[0];
+                auto& indexNode    = exprNode.children[1];
+                auto sizespec      = exprNode.value;
 
 				auto addr = genExpr(addrNode, irb); 
 				auto addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
 
 				auto index = genExpr(indexNode, irb);
 
-				llvm::Type* type = sizespecToLLVMType(sizespecNode, irb);
-				auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
+                llvm::Type* type = sizespecToLLVMType(sizespec, irb);
+                auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
 
 				auto load = irb.CreateLoad(type, getelementpointer);
 

@@ -157,13 +157,13 @@ public:
         NStmtReturn,    // possible children: [expr?]
         NStmtBlock,     // possible children: [statement*]
         NStmtWhile,     // possible children: [expr, stmt]
-        NStmtIf,        // possible children: [expr, stmt, stmt (optional else)]
+        NStmtIf,        // possible children: [expr, stmt, stmt? (optional else)]
         NExprVar,       // possible children: [], identifier: yes
         NExprNum,       // possible children: [], value: yes
         NExprCall,      // possible children: [expr*], identifier: yes
         NExprUnOp,      // possible children: [expr], op: yes (MINUS/TILDE/AMPERSAND/LOGICAL_NOT)
         NExprBinOp,     // possible children: [expr, expr], op: yes (all the binary operators possible)
-        NExprSubscript, // possible children: [expr(addr), expr(index), num (sizespec, 1/2/4/8)]
+        NExprSubscript, // possible children: [expr(addr), expr(index)], value: sizespec, 1/2/4/8
     };
 
     class Hash{

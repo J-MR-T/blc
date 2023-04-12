@@ -151,6 +151,8 @@ namespace Codegen::LLVM{
             return autoVarmap[uID];
         }
 
+        assert(blockInfo.find(block) != blockInfo.end() && "block not found in blockInfo");
+
         auto& [sealed, varmap] = blockInfo[block];
         if(auto it = varmap.find(uID); it != varmap.end()){
             return it->getSecond();
@@ -213,7 +215,9 @@ namespace Codegen::LLVM{
     inline void fillPHIs(llvm::BasicBlock* block) noexcept{
         for(auto& phi: block->phis()){
             for(auto pred: llvm::predecessors(block)){
-                phi.addIncoming(varmapLookup(pred, *(phisToResolve[&phi])), pred);
+                assert(phisToResolve.find(&phi) != phisToResolve.end() && "phi node not found in phisToResolve");
+
+                phi.addIncoming(varmapLookup(pred, *phisToResolve[&phi]), pred);
             }
         }
     }

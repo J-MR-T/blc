@@ -245,29 +245,29 @@ namespace Codegen::LLVM{
             case ASTNode::Type::NExprNum: return llvm::ConstantInt::get(i64, exprNode.value);
             case ASTNode::Type::NExprCall: 
                 {
-				llvm::SmallVector<llvm::Value*, 8> args(exprNode.children.size());
-				for(unsigned int i = 0; i < exprNode.children.size(); ++i)
-					args[i] = genExpr(exprNode.children[i], irb);
+                llvm::SmallVector<llvm::Value*, 8> args(exprNode.children.size());
+                for(unsigned int i = 0; i < exprNode.children.size(); ++i)
+                    args[i] = genExpr(exprNode.children[i], irb);
 
-				auto callee = findFunction(exprNode.ident.name);
-				assert(callee && "got a call to a function that doesn't exist, but was neither forward declared, nor implicitly declared, this should never happen");
-				if(args.size() != callee->arg_size()){
-					// hw02.txt: "Everything else is handled as in ANSI C", hw04.txt: "note that parameters/arguments do not need to match"
-					// but: from the latest C11 standard draft: "the number of arguments shall agree with the number of parameters"
-					// (i just hope thats the same as in C89/ANSI C, can't find that standard anywhere online, Ritchie & Kernighan says this:
-					// "The effect of the call is undefined if the number of arguments disagrees with the number of parameters in the
-					// definition of the function", which is basically the same)
-					// so technically this is undefined behavior >:)
-					using namespace SemanticAnalysis;
-					if(auto it  = externalFunctionsToNumParams.find(exprNode.ident.name);
-							it == externalFunctionsToNumParams.end() ||
-								  externalFunctionsToNumParams[exprNode.ident.name] != EXTERNAL_FUNCTION_VARARGS){
-						// otherwise, there is something weird going on
-						warn("Call to function ", exprNode.ident.name, " with ", args.size(), " arguments, but function has ", callee->arg_size(), " parameters");
-						return llvm::PoisonValue::get(i64);
-					}
-				}
-				return irb.CreateCall(&*callee, args);
+                auto callee = findFunction(exprNode.ident.name);
+                assert(callee && "got a call to a function that doesn't exist, but was neither forward declared, nor implicitly declared, this should never happen");
+                if(args.size() != callee->arg_size()){
+                    // hw02.txt: "Everything else is handled as in ANSI C", hw04.txt: "note that parameters/arguments do not need to match"
+                    // but: from the latest C11 standard draft: "the number of arguments shall agree with the number of parameters"
+                    // (i just hope thats the same as in C89/ANSI C, can't find that standard anywhere online, Ritchie & Kernighan says this:
+                    // "The effect of the call is undefined if the number of arguments disagrees with the number of parameters in the
+                    // definition of the function", which is basically the same)
+                    // so technically this is undefined behavior >:)
+                    using namespace SemanticAnalysis;
+                    if(auto it  = externalFunctionsToNumParams.find(exprNode.ident.name);
+                            it == externalFunctionsToNumParams.end() ||
+                                  externalFunctionsToNumParams[exprNode.ident.name] != EXTERNAL_FUNCTION_VARARGS){
+                        // otherwise, there is something weird going on
+                        warn("Call to function ", exprNode.ident.name, " with ", args.size(), " arguments, but function has ", callee->arg_size(), " parameters");
+                        return llvm::PoisonValue::get(i64);
+                    }
+                }
+                return irb.CreateCall(&*callee, args);
                 }
             case ASTNode::Type::NExprUnOp:
                 {
@@ -310,10 +310,10 @@ namespace Codegen::LLVM{
                 }
             case ASTNode::Type::NExprBinOp:
                 {
-				auto& lhsNode = exprNode.children[0];
-				auto& rhsNode = exprNode.children[1];
+                auto& lhsNode = exprNode.children[0];
+                auto& rhsNode = exprNode.children[1];
 
-				// all the following logical ops need to return i64s to conform to the C like behavior we want
+                // all the following logical ops need to return i64s to conform to the C like behavior we want
 
 #define ICAST(irb, x) irb.CreateIntCast((x), i64, false) // unsigned cast because we want 0 for false and 1 for true (instead of -1)
 
@@ -438,9 +438,9 @@ namespace Codegen::LLVM{
                         }
                         */
 #undef ICAST
-					default:
-						throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as binary operator");
-				}
+                    default:
+                        throw std::runtime_error("Something has gone seriously wrong here, got a " + Token::toString(exprNode.op) + " as binary operator");
+                }
                 }
             case ASTNode::Type::NExprSubscript:
                 {
@@ -450,22 +450,22 @@ namespace Codegen::LLVM{
                 auto& indexNode    = exprNode.children[1];
                 auto sizespec      = exprNode.value;
 
-				auto addr = genExpr(addrNode, irb); 
-				auto addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
+                auto addr = genExpr(addrNode, irb); 
+                auto addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
 
-				auto index = genExpr(indexNode, irb);
+                auto index = genExpr(indexNode, irb);
 
                 llvm::Type* type = sizespecToLLVMType(sizespec, irb);
                 auto getelementpointer = irb.CreateGEP(type, addrPtr, {index});
 
-				auto load = irb.CreateLoad(type, getelementpointer);
+                auto load = irb.CreateLoad(type, getelementpointer);
 
-				// we only have i64s, thus we need to convert our extracted value back to an i64
-				// after reading up on IntCast vs SExt/Trunc (in the source code... Why can't they just document this stuff properly?), it seems that CreateIntCast is a wrapper around CreateSExt/CreateZExt, but in this case we know exactly what we need, so I think CreateSExt would be fine, except that is only allowed if the type is strictly larger, the CreateIntCast distinguishes these cases and takes care of it for us
-				//auto castResult = irb.CreateSExt(load, i64);
-				auto castResult = irb.CreateIntCast(load, i64, true);
+                // we only have i64s, thus we need to convert our extracted value back to an i64
+                // after reading up on IntCast vs SExt/Trunc (in the source code... Why can't they just document this stuff properly?), it seems that CreateIntCast is a wrapper around CreateSExt/CreateZExt, but in this case we know exactly what we need, so I think CreateSExt would be fine, except that is only allowed if the type is strictly larger, the CreateIntCast distinguishes these cases and takes care of it for us
+                //auto castResult = irb.CreateSExt(load, i64);
+                auto castResult = irb.CreateIntCast(load, i64, true);
 
-				return castResult;
+                return castResult;
                 }
             default:
                 throw std::runtime_error("Something has gone seriously wrong here");
@@ -478,26 +478,26 @@ namespace Codegen::LLVM{
         switch(stmtNode.type){
             case ASTNode::Type::NStmtDecl:
                 {
-				auto initializer = genExpr(stmtNode.children[0], irb);
+                auto initializer = genExpr(stmtNode.children[0], irb);
 
-				// i hope setting names doesn't hurt performance, but it wouldn't make sense if it did
-				if(stmtNode.ident.type == IdentifierInfo::AUTO){
-					auto entryBB = &currentFunction->getEntryBlock();
-					auto nonphi = entryBB->getFirstNonPHI();
-					llvm::IRBuilder<> entryIRB(entryBB, entryBB->getFirstInsertionPt()); // i hope this is correct
-					if(nonphi != nullptr){
-						entryIRB.SetInsertPoint(nonphi);
-					}
+                // i hope setting names doesn't hurt performance, but it wouldn't make sense if it did
+                if(stmtNode.ident.type == IdentifierInfo::AUTO){
+                    auto entryBB = &currentFunction->getEntryBlock();
+                    auto nonphi = entryBB->getFirstNonPHI();
+                    llvm::IRBuilder<> entryIRB(entryBB, entryBB->getFirstInsertionPt()); // i hope this is correct
+                    if(nonphi != nullptr){
+                        entryIRB.SetInsertPoint(nonphi);
+                    }
 
-					auto alloca = entryIRB.CreateAlloca(i64, nullptr, stmtNode.ident.name); // this returns the ptr to the alloca'd memory
-					irb.CreateStore(initializer, alloca);
+                    auto alloca = entryIRB.CreateAlloca(i64, nullptr, stmtNode.ident.name); // this returns the ptr to the alloca'd memory
+                    irb.CreateStore(initializer, alloca);
 
-					autoVarmap[stmtNode.ident.uID] = alloca;
-				}else if(stmtNode.ident.type == IdentifierInfo::REGISTER){
-					setRegisterVar(irb, stmtNode, initializer);
-				}else{
-					assert(false && "Invalid identifier type");
-				}
+                    autoVarmap[stmtNode.ident.uID] = alloca;
+                }else if(stmtNode.ident.type == IdentifierInfo::REGISTER){
+                    setRegisterVar(irb, stmtNode, initializer);
+                }else{
+                    assert(false && "Invalid identifier type");
+                }
                 }
                 break;
             case ASTNode::Type::NStmtReturn:
@@ -513,95 +513,95 @@ namespace Codegen::LLVM{
                 break;
             case ASTNode::Type::NStmtIf:
                 {
-				bool hasElse = stmtNode.children.size() == 3;
+                bool hasElse = stmtNode.children.size() == 3;
 
-				auto condition = genExpr(stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1 with this icmp
-				condition = irb.CreateICmp(llvm::CmpInst::ICMP_NE, condition, irb.getInt64(0));
+                auto condition = genExpr(stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1 with this icmp
+                condition = irb.CreateICmp(llvm::CmpInst::ICMP_NE, condition, irb.getInt64(0));
 
-				// to more often make use of fallthrough if genExpr itself generates new blocks, only create the blocks afterwards
-				llvm::BasicBlock* thenBB =         llvm::BasicBlock::Create(ctx, "then",   currentFunction);
-				llvm::BasicBlock* elseBB = hasElse?llvm::BasicBlock::Create(ctx, "else",   currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
-				llvm::BasicBlock* contBB =         llvm::BasicBlock::Create(ctx, "ifCont", currentFunction);
-				if(!hasElse){
-					elseBB = contBB;
-				}
+                // to more often make use of fallthrough if genExpr itself generates new blocks, only create the blocks afterwards
+                llvm::BasicBlock* thenBB =         llvm::BasicBlock::Create(ctx, "then",   currentFunction);
+                llvm::BasicBlock* elseBB = hasElse?llvm::BasicBlock::Create(ctx, "else",   currentFunction): nullptr; // its generated this way around, so that the cont block is always after the else block
+                llvm::BasicBlock* contBB =         llvm::BasicBlock::Create(ctx, "ifCont", currentFunction);
+                if(!hasElse){
+                    elseBB = contBB;
+                }
 
-				irb.CreateCondBr(condition, thenBB, elseBB);
-				// current block is now finished
-				
-				auto& [thenSealed, thenVarmap] = blockInfo[thenBB];
-				thenSealed = true;
-				// var map is queried recursively anyway, would be a waste to copy it here
+                irb.CreateCondBr(condition, thenBB, elseBB);
+                // current block is now finished
+                
+                auto& [thenSealed, thenVarmap] = blockInfo[thenBB];
+                thenSealed = true;
+                // var map is queried recursively anyway, would be a waste to copy it here
 
-				irb.SetInsertPoint(thenBB);
-				genStmt(stmtNode.children[1], irb);
-				auto thenBlock = irb.GetInsertBlock();
+                irb.SetInsertPoint(thenBB);
+                genStmt(stmtNode.children[1], irb);
+                auto thenBlock = irb.GetInsertBlock();
 
-				bool thenBranchesToCont = !(thenBlock->getTerminator());
-				if(thenBranchesToCont){
-					irb.CreateBr(contBB);
-				}
-				// now if is generated -> we can seal else
+                bool thenBranchesToCont = !(thenBlock->getTerminator());
+                if(thenBranchesToCont){
+                    irb.CreateBr(contBB);
+                }
+                // now if is generated -> we can seal else
 
-				auto& [elseSealed, elseVarmap] = blockInfo[elseBB];
-				elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
-				if(hasElse){
-					irb.SetInsertPoint(elseBB);
-					genStmt(stmtNode.children[2], irb);
-					auto elseBlock = irb.GetInsertBlock();
+                auto& [elseSealed, elseVarmap] = blockInfo[elseBB];
+                elseSealed = true; // if this is cont: then it's sealed. If this is else, then it's sealed too (but then cont is not sealed yet!).
+                if(hasElse){
+                    irb.SetInsertPoint(elseBB);
+                    genStmt(stmtNode.children[2], irb);
+                    auto elseBlock = irb.GetInsertBlock();
 
-					bool elseBranchesToCont = !(elseBlock->getTerminator());
-					if(elseBranchesToCont){
-						irb.CreateBr(contBB);
-					}
-				}
+                    bool elseBranchesToCont = !(elseBlock->getTerminator());
+                    if(elseBranchesToCont){
+                        irb.CreateBr(contBB);
+                    }
+                }
 
-				// now that stuff is sealed, can also seal cont
-				blockInfo[contBB].sealed = true;
+                // now that stuff is sealed, can also seal cont
+                blockInfo[contBB].sealed = true;
 
-				// then/else cannot generate phi nodes, because they were sealed from the start and have a single predecessor
+                // then/else cannot generate phi nodes, because they were sealed from the start and have a single predecessor
 
-				// now that we've generated the if, we can 'preceed as before' in the parent call, so just set the irb to the right place
-				irb.SetInsertPoint(contBB); 
+                // now that we've generated the if, we can 'preceed as before' in the parent call, so just set the irb to the right place
+                irb.SetInsertPoint(contBB); 
                 }
                 break;
             case ASTNode::Type::NStmtWhile:
                 {
-				llvm::BasicBlock* condBB = llvm::BasicBlock::Create(ctx, "whileCond", currentFunction);
-				llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(ctx, "whileBody", currentFunction);
-				llvm::BasicBlock* contBB = llvm::BasicBlock::Create(ctx, "whileCont", currentFunction);
+                llvm::BasicBlock* condBB = llvm::BasicBlock::Create(ctx, "whileCond", currentFunction);
+                llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(ctx, "whileBody", currentFunction);
+                llvm::BasicBlock* contBB = llvm::BasicBlock::Create(ctx, "whileCont", currentFunction);
 
-				irb.CreateBr(condBB);
-				// block is now finished
+                irb.CreateBr(condBB);
+                // block is now finished
 
-				blockInfo[condBB].sealed = false; // can get into condition block from body, which is not generated yet
+                blockInfo[condBB].sealed = false; // can get into condition block from body, which is not generated yet
 
-				irb.SetInsertPoint(condBB);
+                irb.SetInsertPoint(condBB);
 
-				auto conditionExpr = genExpr(stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1
-				conditionExpr = irb.CreateICmp(llvm::CmpInst::ICMP_NE, conditionExpr, irb.getInt64(0));
-				irb.CreateCondBr(conditionExpr, bodyBB, contBB);
+                auto conditionExpr = genExpr(stmtNode.children[0], irb); // as everything in our beautiful C like language, this is an i64, so "cast" it to an i1
+                conditionExpr = irb.CreateICmp(llvm::CmpInst::ICMP_NE, conditionExpr, irb.getInt64(0));
+                irb.CreateCondBr(conditionExpr, bodyBB, contBB);
 
-				blockInfo[bodyBB].sealed = true; // can only get into body block from condition block -> all predecessors are known
+                blockInfo[bodyBB].sealed = true; // can only get into body block from condition block -> all predecessors are known
 
-				irb.SetInsertPoint(bodyBB);
-				genStmt(stmtNode.children[1], irb);
-				auto bodyBlock = irb.GetInsertBlock();
+                irb.SetInsertPoint(bodyBB);
+                genStmt(stmtNode.children[1], irb);
+                bodyBB = irb.GetInsertBlock();
 
-				bool bodyBranchesToCond = !(bodyBlock->getTerminator());
-				if(bodyBranchesToCond){
-					irb.CreateBr(condBB);
-				}
+                bool bodyBranchesToCond = !(bodyBB->getTerminator());
+                if(bodyBranchesToCond){
+                    irb.CreateBr(condBB);
+                }
 
-				// seal condition now that all its predecessors (start block and body) are fully known and generated
-				sealBlock(condBB);
+                // seal condition now that all its predecessors (start block and body) are fully known and generated
+                sealBlock(condBB);
 
-				// body cannot generate phi nodes because its sealed from the start and has a single predecessor
-				//fillPHIs(bodyBB);
+                // body cannot generate phi nodes because its sealed from the start and has a single predecessor
+                //fillPHIs(bodyBB);
 
-				blockInfo[contBB].sealed = true;
+                blockInfo[contBB].sealed = true;
 
-				irb.SetInsertPoint(contBB);
+                irb.SetInsertPoint(contBB);
                 }
                 break;
 
@@ -650,7 +650,7 @@ namespace Codegen::LLVM{
         auto& blockNode = fnNode.children[1];
         genStmt(blockNode, irb); // calls gen stmts on the blocks children
 
-		// in case the user didn't return
+        // in case the user didn't return
         auto insertBlock = irb.GetInsertBlock();
         if(insertBlock->hasNUses(0) && insertBlock!=&currentFunction->getEntryBlock()){
             // if the block is unused (for example unreachable because of return statements in all theoretical predecessors), we discard it
@@ -1841,8 +1841,8 @@ namespace Codegen::LLVM::ISel{
             matchPatterns(&fn, patterns);
         }
 
-		bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
-		if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
+        bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
+        if(moduleIsBroken) llvm::errs() << "ISel broke module :(\n";
     }
 } // namespace Codegen::LLVM::ISel
 
@@ -2282,8 +2282,8 @@ namespace Codegen::LLVM::RegAlloc{
             regallocFn(f);
         }
 
-		bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
-		if(moduleIsBroken) llvm::errs() << "RegAlloc broke module :(\n";
+        bool moduleIsBroken = llvm::verifyModule(*moduleUP, &llvm::errs());
+        if(moduleIsBroken) llvm::errs() << "RegAlloc broke module :(\n";
     }
 
     
@@ -2907,7 +2907,7 @@ int main(int argc, char *argv[]) {
 		}
 
         MEASURE_TIME_START(codegen);
-		genSuccess = Codegen::LLVM::generate(*ast);
+        genSuccess = Codegen::LLVM::generate(*ast);
 
         if(!genSuccess){
             llvm::errs() << "Generating LLVM-IR failed :(\nIndividual errors displayed above\n";
@@ -2922,8 +2922,8 @@ int main(int argc, char *argv[]) {
                 return ret;
 
         }else{
-			if(args.llvm())
-				Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+            if(args.llvm())
+                Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
 
             // isel
             MEASURE_TIME_START(isel);
@@ -2931,8 +2931,8 @@ int main(int argc, char *argv[]) {
             MEASURE_TIME_END(isel);
             iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
 
-			if(args.isel())
-				Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+            if(args.isel())
+                Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
 
             // regalloc
             MEASURE_TIME_START(regalloc);
@@ -2940,8 +2940,8 @@ int main(int argc, char *argv[]) {
             MEASURE_TIME_END(regalloc);
             regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
 
-			if(args.regalloc())
-				Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+            if(args.regalloc())
+                Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
 
             // asm
             MEASURE_TIME_START(asm);

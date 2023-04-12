@@ -178,15 +178,15 @@ int llvmCompileAndLinkMod(llvm::Module& mod){
     using namespace ArgParse;
 
     // adapted from https://www.llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl08.html
-	llvm::InitializeAllTargetInfos();
-	llvm::InitializeAllTargets();
-	llvm::InitializeAllTargetMCs();
-	llvm::InitializeAllAsmParsers();
-	llvm::InitializeAllAsmPrinters();
-	//llvm::InitializeNativeTarget();
-	//llvm::InitializeNativeTargetAsmPrinter();
-	//llvm::InitializeNativeTargetAsmParser();
-	//llvm::InitializeNativeTargetDisassembler();
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmParsers();
+    llvm::InitializeAllAsmPrinters();
+    //llvm::InitializeNativeTarget();
+    //llvm::InitializeNativeTargetAsmPrinter();
+    //llvm::InitializeNativeTargetAsmParser();
+    //llvm::InitializeNativeTargetDisassembler();
 
 
     auto targetTriple = llvm::sys::getDefaultTargetTriple();

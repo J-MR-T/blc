@@ -620,15 +620,15 @@ ASTNode Parser::parsePrimaryExpression(){
 
 ASTNode Parser::parseSubscript(ASTNode&& lhs){
     auto expr = parseExpr();
-	int num = 8;
+    int num = 8;
     if(tok.matchToken(Token::Type::AT)){
         // has to be followed by number
         tok.assertToken(Token::Type::NUM, false);
 
         // parse sizespec as number, validate it's 1/2/4/8
-		auto numNode = parsePrimaryExpression(); // can't be bothered to reimplement it here ^^
+        auto numNode = parsePrimaryExpression(); // can't be bothered to reimplement it here ^^
 
-		num = numNode.value;
+        num = numNode.value;
         if(
             !(
                 num==1 ||
@@ -644,10 +644,10 @@ ASTNode Parser::parseSubscript(ASTNode&& lhs){
     tok.assertToken(Token::Type::R_BRACKET);
 
     auto subscript = ASTNode(ASTNode::Type::NExprSubscript, {
-		std::move(lhs),
-		std::move(expr)
-	});
-	subscript.value = num;
+        std::move(lhs),
+        std::move(expr)
+    });
+    subscript.value = num;
 
     return subscript;
 }
@@ -911,7 +911,7 @@ namespace SemanticAnalysis{
             return;
         }else if((node.type == ASTNode::Type::NExprBinOp && node.op == Token::Type::ASSIGN) || (node.type == ASTNode::Type::NExprUnOp && node.op == Token::Type::AMPERSAND)){
             if(node.type == ASTNode::Type::NExprUnOp && node.children[0].type == ASTNode::Type::NExprVar){
-				assert(node.op == Token::Type::AMPERSAND);
+                assert(node.op == Token::Type::AMPERSAND);
 
                 // register variables and parameters are not permitted as operands to the unary addrof & operator
                 // subscript is fine and thus left out here

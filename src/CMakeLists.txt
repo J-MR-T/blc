@@ -13,10 +13,10 @@ llvm_map_components_to_libnames(llvm_libs executionengine)
 message(STATUS "LLVM libs: ${llvm_libs}")
 
 set(LIBS
-		${llvm_libs}
+        ${llvm_libs}
         ${dialect_libs}
         ${conversion_libs}
-		MLIRB
+        MLIRB
 
         MLIRAnalysis
         MLIRCallInterfaces
@@ -60,8 +60,8 @@ target_compile_options(blc PUBLIC -fexceptions)
 
 # if its the debug build, add sanitizer flags
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-	target_compile_options(blc PUBLIC -fsanitize=address -fsanitize=undefined -fsanitize=leak -fno-sanitize-recover=all)
-	target_link_options(blc PUBLIC -fsanitize=address -fsanitize=undefined -fsanitize=leak -fno-sanitize-recover=all)
+    target_compile_options(blc PUBLIC -fsanitize=address -fsanitize=undefined -fsanitize=leak -fno-sanitize-recover=all)
+    target_link_options(blc PUBLIC -fsanitize=address -fsanitize=undefined -fsanitize=leak -fno-sanitize-recover=all)
 endif()
 
 mlir_check_all_link_libraries(blc)

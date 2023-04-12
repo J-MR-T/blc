@@ -111,7 +111,7 @@ namespace ArgParse{
         const Arg isel{      "s", "isel"      , 0, "Output (ARM-) instruction selected LLVM-IR"                                                          , false, true};
         const Arg regalloc{  "r", "regalloc"  , 0, "Output (ARM-) register allocated LLVM-IR"                                                            , false, true};
         const Arg asmout{    "a", "asm"       , 0, "Output (ARM-) assembly"                                                                              , false, true};
-		const Arg mlir{      "m", "mlir"      , 0, "Print MLIR if used without -o. Compiles to object file and links to executable if used with -o.\n"
+        const Arg mlir{      "m", "mlir"      , 0, "Print MLIR if used without -o. Compiles to object file and links to executable if used with -o.\n"
                                                    "Disables the rest of the compilation process"                                                        , false, true};
         const Arg interpret{ "x", "execute"   , 0, "Execute the generated LLVM module immediately."                                                      , false, true};
 
@@ -150,28 +150,28 @@ namespace ArgParse{
 // like https://www.llvm.org/docs/ProgrammersManual.html#dss-sortedvectormap recommends, use a sorted vector for strict insert then query map (this is even a subset of that, it doesn't support inserting after building at all)
 template<std::totally_ordered K, typename V>
 struct InsertOnceQueryAfterwardsMap{
-	using ElemPairType = typename std::pair<K,V>;
+    using ElemPairType = typename std::pair<K,V>;
 
-	static int compare(const ElemPairType& elem1, const ElemPairType& elem2){
-		return elem1.first < elem2.first;
-	}
+    static int compare(const ElemPairType& elem1, const ElemPairType& elem2){
+        return elem1.first < elem2.first;
+    }
 
-	llvm::SmallVector<ElemPairType> vec;
+    llvm::SmallVector<ElemPairType> vec;
 
-	InsertOnceQueryAfterwardsMap() = default;
+    InsertOnceQueryAfterwardsMap() = default;
 
-	InsertOnceQueryAfterwardsMap(const llvm::ArrayRef<ElemPairType> &arr) : vec(arr){
-		std::sort(vec.begin(), vec.end(), compare);
-	}
+    InsertOnceQueryAfterwardsMap(const llvm::ArrayRef<ElemPairType> &arr) : vec(arr){
+        std::sort(vec.begin(), vec.end(), compare);
+    }
 
     /// only supports lookup of actually inserted items, will segfault otherwise
-	const V& operator[](const K &key) const{
+    const V& operator[](const K &key) const{
         assert(std::is_sorted(vec.begin(), vec.end(), compare) && "InsertOnceQueryAfterwardsMap not sorted");
 
-		auto it = std::lower_bound(vec.begin(), vec.end(), ElemPairType{key,V{}}, compare); // the V{} is just a dummy value, it will be ignored
-		assert((it != vec.end() && it->first == key) && "Item from InsertOnceQueryAfterwardsMap not found");
-		return it->second;
-	}
+        auto it = std::lower_bound(vec.begin(), vec.end(), ElemPairType{key,V{}}, compare); // the V{} is just a dummy value, it will be ignored
+        assert((it != vec.end() && it->first == key) && "Item from InsertOnceQueryAfterwardsMap not found");
+        return it->second;
+    }
 
     /// at
     /*
@@ -193,15 +193,15 @@ struct InsertOnceQueryAfterwardsMap{
         return it != vec.end() && it->first == key;
     }
 
-	// expose iterators
+    // expose iterators
 
-	typename llvm::SmallVector<ElemPairType>::iterator begin(){
-		return &*vec.begin();
-	}
+    typename llvm::SmallVector<ElemPairType>::iterator begin(){
+        return &*vec.begin();
+    }
 
-	typename llvm::SmallVector<ElemPairType>::iterator end(){
-		return &*vec.end();
-	}
+    typename llvm::SmallVector<ElemPairType>::iterator end(){
+        return &*vec.end();
+    }
 };
 
 // explicit instantiation to catch errors

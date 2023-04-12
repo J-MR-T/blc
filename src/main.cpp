@@ -44,6 +44,7 @@
 #include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/Analysis/CFG.h>
+#include <llvm/ExecutionEngine/ExecutionEngine.h>
 #pragma GCC diagnostic pop
 
 #include "util.h"
@@ -810,7 +811,7 @@ namespace Codegen::LLVM::ISel{
         static std::unordered_map<Pattern, llvm::Value* (*)(llvm::IRBuilder<>&), PatternHash> replacementCalls;
 
         void replaceWithARM(llvm::Instruction* instr) const{
-            llvm::IRBuilder<> irb(instr->getParent());
+            llvm::IRBuilder<> irb(instr->getParent()); // TODO segfault, probably instr without parent???
             auto root = instr;
 
             irb.SetInsertPoint(root);
@@ -937,6 +938,7 @@ namespace Codegen::LLVM::ISel{
 
     /// for useful matching the patterns need to be sorted by totalSize (descending) here. For this simple isel, this is just done by hand
     std::unordered_map<llvm::Instruction*, const Pattern&> matchPatterns(llvm::Function* func, const std::vector<Pattern>& patterns){
+        // TODO make this ValueMaps at some point
         std::unordered_map<llvm::Instruction*, const Pattern&> matches{};
         std::unordered_set<llvm::Instruction*> covered{};
         for(auto& block:*func){
@@ -1086,9 +1088,9 @@ namespace Codegen::LLVM{
 
     // REFACTOR: make an array, if i find a way to nicely count the number of enum values
     static std::unordered_map<ARMInstruction, llvm::Function*> instructionFunctions;
-			// REFACTOR: If I initialize this directly, llvm decides not to use opaque pointers for allocas for some reason. Don't ask me why
+            // REFACTOR: If I initialize this directly, llvm decides not to use opaque pointers for allocas for some reason. Don't ask me why
     static void initInstructionFunctions(){
-		instructionFunctions = {
+        instructionFunctions = {
         CREATE_INST_FN(ARM_add,       i64,                            i64,  i64),
         CREATE_INST_FN(ARM_add_SP,    voidTy,                         i64), // simulate add to stack pointer
         CREATE_INST_FN(ARM_add_SHIFT, i64,                            i64,  i64,                               i64),
@@ -1141,7 +1143,7 @@ namespace Codegen::LLVM{
 
         // 'metadata' calls
         CREATE_INST_FN_VARARGS(ZExt_handled_in_Reg_Alloc, i64),
-		};
+        };
     };
 
 
@@ -1348,7 +1350,7 @@ namespace Codegen::LLVM::ISel{
         Pattern::make_root(
             [](llvm::IRBuilder<>& irb) -> llvm::Value* {
                 auto instr = &*irb.GetInsertPoint();
-                return irb.CreateCall(instructionFunctions[ARM_madd], {OP_N_MAT(instr,0), OP_N_MAT(instr,1), XZR});
+                return irb.CreateCall(instructionFunctions[ARM_madd], {OP_N_MAT(instr,0), OP_N_MAT(instr,1), XZR}); // TODO segfault here, operand doesn't exist
             },
             llvm::Instruction::Mul,
             {}
@@ -2887,33 +2889,49 @@ int main(int argc, char *argv[]) {
             }
         }
     } else {
-		// behavior for the args: if mlir() is set, we output either mlir, or a binary, depending on -o. Otherwise:
-		// we always generate the llvm module
-		// if output is set, we produce a binary from the llvm module, otherwise
-		// we do isel, regalloc and asm and
-		// if llvm, isel, regalloc or asmout are set, we output the corresponding IR
+        // behavior for the args: if mlir() is set, we output either mlir, or a binary, depending on -o. Otherwise:
+        // we always generate the llvm module
+        // if output is set, we produce a binary from the llvm module, otherwise
+        // we do isel, regalloc and asm and
+        // if llvm, isel, regalloc or asmout are set, we output the corresponding IR
 
         std::error_code errorCode;
         std::string outfile = args.output() ? *args.output : "-"; // "-" == stdout
         llvm::raw_fd_ostream llvmOut = llvm::raw_fd_ostream(outfile, errorCode);
         llvm::raw_fd_ostream devNull = llvm::raw_fd_ostream("/dev/null", errorCode);
 
-		if(errorCode){
-			err(ExitCode::ERROR_IO, "Could not open output file %s", outfile.c_str());
-		}
+        if(errorCode){
+            err(ExitCode::ERROR_IO, "Could not open output file %s", outfile.c_str());
+        }
 
-		if(args.mlir()){
-            DEBUGLOG("TEST");
-			// TODO
-			genSuccess = Codegen::MLIR::generate(*ast);
+        if(args.mlir()){
+            // TODO
+            auto test = [&](){
 
-			if(args.output()){
-				// TODO mlir mod -> llvm mod -> binary
-			}else{
-				Codegen::MLIR::mod.print(llvmOut);
-			}
-			goto continu;
-		}
+            auto ctx = mlir::MLIRContext();
+            auto [genSuccess, warnings, modUP] = Codegen::MLIR::generate(ctx, *ast);
+
+            if(!genSuccess){
+                llvm::errs() << "Generating MLIR failed :(\nIndividual errors displayed above\n";
+                llvm::errs() << "Module: \n";
+                modUP->dump();
+
+                return;
+            }
+
+            if(args.output()){
+                // TODO mlir mod -> llvm mod -> binary
+            }else{
+                modUP->print(llvmOut);
+            }
+
+            if(args.interpret()){
+                // TODO
+            }
+            };
+            test();
+            goto continu;
+        }
 
         MEASURE_TIME_START(codegen);
         genSuccess = Codegen::LLVM::generate(*ast);
@@ -2925,7 +2943,36 @@ int main(int argc, char *argv[]) {
         MEASURE_TIME_END(codegen);
         codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
-        if(args.output()){
+        if(args.interpret()){
+            // TODO doesn't work
+
+            // instantiate an execution engine (kind interpreter) on the Codegen::LLVM::moduleUP
+            llvm::EngineBuilder builder(std::move(Codegen::LLVM::moduleUP));
+
+            std::string error;
+            llvm::TargetOptions options;
+
+            builder.setEngineKind(llvm::EngineKind::Interpreter);
+
+            builder.setErrorStr(&error);
+            builder.setOptLevel(llvm::CodeGenOpt::None);
+            builder.setTargetOptions(options);
+
+            auto engine = builder.create();
+            if(!engine){
+                llvm::errs() << "Could not create execution engine\n";
+                goto continu;
+            }
+
+            auto mainFunc = engine->getFunctionAddress("main");
+            if(!mainFunc){
+                llvm::errs() << "Could not find main function\n";
+                goto continu;
+            }
+
+            // call main
+            return reinterpret_cast<int(*)(int, char**)>(mainFunc)(0, nullptr);
+        }else if(args.output()){
             int ret = llvmCompileAndLinkMod(*Codegen::LLVM::moduleUP);
             if(ret != 0)
                 return ret;

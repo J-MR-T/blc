@@ -8,14 +8,17 @@ include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/OpBase.td"
 
 include "mlir/IR/BuiltinTypes.td"
-// NEVER INCLUDE THIS: "mlir/IR/BuiltinOps.td". Breaks everything for some reason
+// don't include this: "mlir/IR/BuiltinOps.td". Breaks everything for some reason
 include "mlir/IR/BuiltinAttributes.td"
 include "mlir/IR/BuiltinDialect.td"
 
 include "mlir/IR/BuiltinTypeInterfaces.td"
 include "mlir/IR/FunctionInterfaces.td"
 include "mlir/IR/SymbolInterfaces.td"
-//this also seems to break everything: "mlir/Interfaces/InferTypeOpInterface.td"
+// this also seems to break everything:
+// ah it only broke everything because the corresponding header wasn't included in BOps.h, done that now, so this should work and define some nice builders
+include "mlir/Interfaces/InferTypeOpInterface.td"
+
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 // === types ===
@@ -82,9 +85,6 @@ def AllocaOp : B_Op<"alloca">{
     OpBuilder<(ins CArg<"uint8_t", "8">:$size /* default to 8 bytes, because our lang basically only needs that */ ), [{
       build($_builder, $_state, PointerType::get($_builder.getContext()), size);
     }]>
-    /*OpBuilder<(ins "IntegerType":$type), [{*/
-    /*  build($_builder, $_state, PointerType::get($_builder.getContext()), type.getIntOrFloatBitWidth() /* or type.getWidth() ? */);*/
-    /*}]>*/
   ];
 }
 
@@ -99,12 +99,6 @@ def PtrToIntOp : B_Op<"ptrtoint">{
   let arguments = (ins B_PointerType:$ptr);
 
   let results = (outs I64:$result);
-
-  let builders = [
-    OpBuilder<(ins "Value":$ptr), [{
-      build($_builder, $_state, PointerType::get($_builder.getContext()), ptr);
-    }]>
-  ];
 }
 
 def IntToPtrOp : B_Op<"inttoptr">{
@@ -118,12 +112,6 @@ def IntToPtrOp : B_Op<"inttoptr">{
   let arguments = (ins I64:$intt);
 
   let results = (outs B_PointerType:$result);
-
-  let builders = [
-    OpBuilder<(ins "Value":$intt), [{
-      build($_builder, $_state, PointerType::get($_builder.getContext()), intt);
-    }]>
-  ];
 }
 
 def StoreOp : B_Op<"store">{
@@ -150,12 +138,6 @@ def LoadOp : B_Op<"load">{
   let arguments = (ins B_PointerType:$ptr);
 
   let results = (outs I64:$result);
-
-  let builders = [
-    OpBuilder<(ins "Value":$ptr), [{
-      build($_builder, $_state, IntegerType::get($_builder.getContext(), 64), ptr);
-    }]>
-  ];
 }
 
 #endif

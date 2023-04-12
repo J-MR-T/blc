@@ -5,6 +5,7 @@
 
 #include "mlir/IR/Dialect.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 
 #include "mlir/IR/Builders.h"
 

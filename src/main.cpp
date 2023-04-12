@@ -842,6 +842,9 @@ namespace Codegen::LLVM::ISel{
                 pushOps(instr, patternQueue.front());
                 patternQueue.pop();
 
+                // TODO do this in a nicer way. This just fixes llvm complaining, that the value is still used when it's being deleted (although that is totally fine here, because all of the uses will be deleted shortly after).
+                instr->replaceAllUsesWith(llvm::UndefValue::get(instr->getType()));
+
                 instr->eraseFromParent();
             }
 
@@ -2199,10 +2202,11 @@ namespace Codegen::LLVM::RegAlloc{
         for(auto& bb: f){
             for(auto& inst: llvm::make_early_inc_range(bb)){
                 if(auto call = llvm::dyn_cast_if_present<llvm::CallInst>(&inst)){
+                    allocator.irb.SetInsertPoint(call);
+
                     // pseudo stores for phis
                     if (call->getCalledFunction() == instructionFunctions[ARM_PSEUDO_str]) {
                         // pseudo store, we need to possibly insert load for mem-mem mov
-                        allocator.irb.SetInsertPoint(call);
 
                         auto op = call->getArgOperand(0);
                         
@@ -2230,15 +2234,15 @@ namespace Codegen::LLVM::RegAlloc{
                     }else if(call->hasMetadata("reg")){
                         continue;
                     }else if(call->getCalledFunction() == instructionFunctions[ZExt_handled_in_Reg_Alloc]){
+                        // replace stuff with loads etc.
+                        allocator.tryGetAndRewriteInstruction(call, inst.getOperand(0));
+
+                        // replace the zext itself with the generated load
                         inst.replaceAllUsesWith(inst.getOperand(0));
                         inst.eraseFromParent();
                     }else if(!call->getCalledFunction()->hasMetadata("arm_instruction_function")){
-                        allocator.irb.SetInsertPoint(call);
                         allocator.functionCall(call);
                     }else{
-                        allocator.irb.SetInsertPoint(call);
-
-
                         // loads for phis dont need seperate loads for their arguments, those are already correct
                         if(!call->hasMetadata("phi")){
                             for(auto& arg: call->args()){
@@ -2273,6 +2277,9 @@ namespace Codegen::LLVM::RegAlloc{
                 for(auto& use: phi->uses())
                     assert(llvm::isa<llvm::PHINode>(use.get()) && "phi which is about to be deleted should only be used by other phis (so effectively no uses anymore)");
 #endif
+            // TODO this is only to stop the assertion failures (phi might still be used by other phis yet to be deleted), try to get rid of this to avoid the performance hit
+            phi->replaceAllUsesWith(llvm::UndefValue::get(phi->getType()));
+
             phi->deleteValue();
         }
     }
@@ -2797,8 +2804,6 @@ int main(int argc, char *argv[]) {
 #define MEASURE_TIME_END(point) auto point ## _end = std::chrono::high_resolution_clock::now()
 
 #define MEASURED_TIME_AS_SECONDS(point, iterations) std::chrono::duration_cast<std::chrono::duration<double>>(point ## _end - point ## _start).count()/(static_cast<double>(iterations))
-
-    std::cout << "test\n";
 
     Codegen::LLVM::initInstructionFunctions();
     auto parsedArgs = ArgParse::parse(argc, argv);

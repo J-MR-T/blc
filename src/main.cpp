@@ -292,7 +292,7 @@ namespace Codegen::LLVM{
                             // REFACTOR: would be nice to merge this with the code for loading from subscripts at some point, its almost the same
                             auto& addrNode     = operandNode.children[0];
                             auto& indexNode    = operandNode.children[1];
-                            auto sizespec      = exprNode.value;
+                            auto sizespec      = operandNode.value;
 
                             auto addr = genExpr(addrNode, irb); 
                             auto addrPtr  = irb.CreateIntToPtr(addr, irb.getPtrTy()); // opaque ptrs galore!
@@ -375,7 +375,7 @@ namespace Codegen::LLVM{
                     if(lhsNode.type == ASTNode::Type::NExprSubscript){
                         auto addr     = genExpr(lhsNode.children[0], irb);
                         auto index    = genExpr(lhsNode.children[1], irb);
-                        auto sizespec = exprNode.value;
+                        auto sizespec = lhsNode.value;
 
                         llvm::Type* type = sizespecToLLVMType(sizespec, irb);
                         // first cast, then store, so that the right amount is stored

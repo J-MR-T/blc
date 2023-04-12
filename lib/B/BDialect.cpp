@@ -5,8 +5,6 @@
 using namespace mlir;
 using namespace mlir::b;
 
-//#include "B/BOpsDialect.cpp.inc"
-
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -14,6 +12,7 @@ using namespace mlir::b;
 #define GET_TYPEDEF_CLASSES
 #include "B/BOpsTypes.cpp.inc"
 
+#include "B/BOpsDialect.cpp.inc"
 
 void BDialect::initialize() {
   addOperations<
@@ -29,8 +28,10 @@ void BDialect::initialize() {
 
   addTypes<
 #define GET_TYPEDEF_LIST
-#include "B/BOps.cpp.inc"
+#include "B/BOpsTypes.cpp.inc"
       >();
+  // fallback, in case this thing above doesn't work
+  //addTypes<mlir::b::PointerType>();
 }
 
 //void b::ConstantOp::build(mlir::OpBuilder &builder, mlir::OperationState &state, double value) {

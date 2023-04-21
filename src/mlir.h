@@ -4,8 +4,11 @@
 #include "frontend.h"
 
 namespace Codegen::MLIR{
-    extern bool warningsGenerated;
-	extern mlir::ModuleOp mod;
+    /// yes im going this far to avoid the cpp class decl/impl nonsense
+    std::tuple<bool /* failed? */, bool /* warnings generated? */, mlir::OwningOpRef<mlir::ModuleOp>> generate(mlir::MLIRContext&, AST&) noexcept;
 
-	bool generate(AST& ast) noexcept;
+    void canonicalizerTest() noexcept;
+    bool runCanonicalizer(mlir::ModuleOp mod) noexcept;
+
+    mlir::LogicalResult lowerToLLVM(mlir::ModuleOp mod) noexcept;
 }

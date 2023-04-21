@@ -25,14 +25,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Install lit
-      run: pip install lit
-    - name: Install FileCheck
-      run: sudo apt install llvm-15-tools && sudo ln -s /usr/bin/FileCheck-15 /usr/bin/FileCheck && sudo ln -s /usr/lib/llvm-15/bin/not /usr/bin/not
-    - name: Install aarch64-gnu-linux-gcc
-      run: sudo apt install gcc-aarch64-linux-gnu
-    - name: Install qemu
-      run: sudo apt install qemu-user
+    - name: Install dependencies
+      run: |
+        pip install lit
+        # filecheck
+        sudo apt install llvm-15-tools && sudo ln -s /usr/bin/FileCheck-15 /usr/bin/FileCheck && sudo ln -s /usr/lib/llvm-15/bin/not /usr/bin/not
+        # aarch64-gnu-linux-gcc, qemu-aarch64, ...
+        sudo apt install gcc-aarch64-linux-gnu qemu-user libtinfo5 libncurses-dev cmake extra-cmake-modules terminfo gcc g++
     - name: Cache LLVM and Clang
       id: cache-llvm
       uses: actions/cache@v2
@@ -40,11 +39,11 @@ jobs:
         path: |
           C:/Program Files/LLVM
           ./llvm
-        key: llvm-15.0.6
+        key: llvm-16.0.0
     - name: Install LLVM and Clang
       uses: KyleMayes/install-llvm-action@v1
       with:
-        version: "15.0.6"
+        version: "16.0.0"
         cached: ${{ steps.cache-llvm.outputs.cache-hit }}
     - name: Test Debug build (normal)
       run: make test

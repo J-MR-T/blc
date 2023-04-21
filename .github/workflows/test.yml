@@ -46,9 +46,9 @@ jobs:
         version: "16.0.0"
         cached: ${{ steps.cache-llvm.outputs.cache-hit }}
     - name: Test Debug build (normal)
-      run: make test
+      run: LLVM_BUILD_DIR=./llvm make -e test
     - name: Remove previous build
       run: make clean
     - name: Test Production build
-      run: make && lit -j1 -sv .
+      run: LLVM_BUILD_DIR=./llvm make -e && lit -j1 -sv .
 

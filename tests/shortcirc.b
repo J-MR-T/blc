@@ -20,13 +20,9 @@ baz(){
 }
 
 main(){
-    printnum(foo());
-    // CHECK: 1
-    printnum(bar());
-    // CHECK-NEXT: 3
-    printnum(baar());
-    // CHECK-NEXT: 2
-    printnum(baz());
-    // CHECK-NEXT: 0
+    printnum(foo()); // CHECK: 1
+    printnum(bar()); // CHECK-NEXT: 3
+    printnum(baar()); // CHECK-NEXT: 2
+    printnum(baz()); // CHECK-NEXT: 0
     return 0;
 }

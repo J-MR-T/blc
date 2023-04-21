@@ -23,6 +23,8 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 
 // === types ===
 
+// TODO if there was pointer arithmetic, then ptrtoint(inttoptr(x)) -> x would not be a valid transformation (well, depends, but it would change provenance), but I think it's fine in this case, because there isn't really provenance anyway
+
 // base type
 class B_Type<string name, string typeMnemonic, list<Trait> traits = []>
     : TypeDef<B_Dialect, name, traits> {
@@ -48,18 +50,18 @@ def AllocaOp : B_Op<"alloca">{
     The result is the address of the allocated memory as a b.ptr.
   }];
 
-  let arguments = (ins I8Attr:$size);
+  let arguments = (ins I8Attr:$width);
 
   let results = (outs B_PointerType:$result);
 
   let builders = [
-    OpBuilder<(ins CArg<"uint8_t", "8">:$size /* default to 8 bytes, because our lang basically only needs that */ ), [{
-      build($_builder, $_state, PointerType::get($_builder.getContext()), size);
+    OpBuilder<(ins CArg<"uint8_t", "8">:$width /* default to 8 bytes, because our lang basically only needs that */ ), [{
+      build($_builder, $_state, PointerType::get($_builder.getContext()), width);
     }]>
   ];
 }
 
-def PtrToIntOp : B_Op<"ptrtoint">{
+def PtrToIntOp : B_Op<"ptrtoint", [Pure]>{
   let summary = "operation to convert a pointer to an integer";
 
   let description = [{
@@ -70,9 +72,11 @@ def PtrToIntOp : B_Op<"ptrtoint">{
   let arguments = (ins B_PointerType:$ptr);
 
   let results = (outs I64:$result);
+
+  let hasCanonicalizer = 1; // canonicalizes ptrtoint(inttoptr(x)) -> x
 }
 
-def IntToPtrOp : B_Op<"inttoptr">{
+def IntToPtrOp : B_Op<"inttoptr", [Pure]>{
   let summary = "operation to convert an integer to a pointer";
 
   let description = [{
@@ -83,6 +87,8 @@ def IntToPtrOp : B_Op<"inttoptr">{
   let arguments = (ins I64:$intt);
 
   let results = (outs B_PointerType:$result);
+
+  let hasCanonicalizer = 1; // canonicalizes inttoptr(ptrtoint(x)) -> x
 }
 
 def StoreOp : B_Op<"store">{
@@ -98,7 +104,7 @@ def StoreOp : B_Op<"store">{
   let results = (outs);
 }
 
-def LoadOp : B_Op<"load">{
+def LoadOp : B_Op<"load", [Pure]>{
   let summary = "operation to load a value from a memory location";
 
   let description = [{

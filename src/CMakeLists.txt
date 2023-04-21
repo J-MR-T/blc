@@ -43,13 +43,23 @@ set(LIBS
         xml2
         )
 
+# tablegen for the combine patterns TODO doesn't work yet
+set(LLVM_TARGET_DEFINITIONS BCombine.td)
+mlir_tablegen(BCombine.inc -gen-rewriters)
+add_public_tablegen_target(MLIRBCombineIncGen)
+
 # this solves the linker errors with the target specific initialize methods
 set(LLVM_LINK_COMPONENTS
   ${LLVM_TARGETS_TO_BUILD}
   )
 message(STATUS "LLVM link components: ${LLVM_LINK_COMPONENTS}")
 #
-add_llvm_executable(blc main.cpp frontend.cpp util.cpp mlir.cpp)
+add_llvm_executable(blc main.cpp frontend.cpp util.cpp mlir.cpp DEPENDS MLIRBCombineIncGen)
+#add_dependencies(blc MLIRBCombineIncGen)
+#add_file_dependencies(blc ${CMAKE_CURRENT_BINARY_DIR}/BCombine.inc)
+
+# this is necessary here too, otherwise the preprocessor doesn't find the tablegen file...
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 llvm_update_compile_flags(blc)
 target_link_libraries(blc PRIVATE ${LIBS})

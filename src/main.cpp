@@ -47,6 +47,9 @@
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #pragma GCC diagnostic pop
 
+#include <mlir/Target/LLVMIR/Export.h>
+#include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
+
 #include "util.h"
 #include "frontend.h"
 #include "mlir.h"
@@ -828,7 +831,7 @@ namespace Codegen::LLVM::ISel{
                     if(currentPattern->children[i].opcode && !currentPattern->children[i].noDelete){
                         auto op = instr->getOperand(i);
                         auto opInstr = llvm::dyn_cast<llvm::Instruction>(op);
-                        assert(opInstr != nullptr);
+                        assert(opInstr);
                         toRemove.push(opInstr);
                         patternQueue.push(currentPattern->children.data()+i);
                     }
@@ -2807,7 +2810,6 @@ int main(int argc, char *argv[]) {
 
 #define MEASURED_TIME_AS_SECONDS(point, iterations) std::chrono::duration_cast<std::chrono::duration<double>>(point ## _end - point ## _start).count()/(static_cast<double>(iterations))
 
-    Codegen::LLVM::initInstructionFunctions();
     auto parsedArgs = ArgParse::parse(argc, argv);
 
     if(ArgParse::args.help()){
@@ -2889,7 +2891,11 @@ int main(int argc, char *argv[]) {
             }
         }
     } else {
-        // behavior for the args: if mlir() is set, we output either mlir, or a binary, depending on -o. Otherwise:
+        // behavior for the args: if mlir() is set, 
+        // we output mlir, if nothing else is set,
+        // we output an llvm module if llvm is set,
+        // or a binary, depending on -o. Otherwise:
+        //
         // we always generate the llvm module
         // if output is set, we produce a binary from the llvm module, otherwise
         // we do isel, regalloc and asm and
@@ -2905,31 +2911,49 @@ int main(int argc, char *argv[]) {
         }
 
         if(args.mlir()){
-            // TODO
-            auto test = [&](){
-
-            auto ctx = mlir::MLIRContext();
-            auto [genSuccess, warnings, modUP] = Codegen::MLIR::generate(ctx, *ast);
+            auto mlirCtx = mlir::MLIRContext();
+            auto [genSuccess, warnings, owningModRef] = Codegen::MLIR::generate(mlirCtx, *ast);
 
             if(!genSuccess){
-                llvm::errs() << "Generating MLIR failed :(\nIndividual errors displayed above\n";
                 llvm::errs() << "Module: \n";
-                modUP->dump();
+                owningModRef->dump();
+                llvm::errs() << "Generating MLIR failed :(\nIndividual errors displayed above\n";
 
-                return;
+                goto continu;
             }
 
-            if(args.output()){
-                // TODO mlir mod -> llvm mod -> binary
-            }else{
-                modUP->print(llvmOut);
+            // mlir mod -> llvm mod
+
+            mlir::registerLLVMDialectTranslation(mlirCtx);
+
+            // my dialect soup mod -> llvm dialect mod
+            if(failed(Codegen::MLIR::lowerToLLVM(*owningModRef))){
+                llvm::errs() << "Could not lower MLIR module to LLVM dialect :(\n";
+                goto continu;
+            }
+
+            // llvm dialect mod -> llvm mod
+            llvm::LLVMContext llvmCtx;
+            auto llvmModUP = mlir::translateModuleToLLVMIR(*owningModRef, llvmCtx);
+
+            if(!llvmModUP){
+                llvm::errs() << "Could not translate MLIR module to LLVM IR\n";
+                goto continu;
             }
 
             if(args.interpret()){
                 // TODO
+                llvm::errs() << "Interpretation of MLIR not yet implemented\n";
+            }else if(args.llvm()){
+                llvmModUP->print(llvmOut, nullptr);
+            }else if(args.output()){
+                // llvm mod -> binary
+                int ret = llvmCompileAndLinkMod(*Codegen::LLVM::moduleUP);
+                if(ret != 0)
+                    return ret;
+            }else{
+                owningModRef->print(llvmOut);
             }
-            };
-            test();
             goto continu;
         }
 
@@ -2980,6 +3004,8 @@ int main(int argc, char *argv[]) {
         }else{
             if(args.llvm())
                 Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+
+            Codegen::LLVM::initInstructionFunctions();
 
             // isel
             MEASURE_TIME_START(isel);

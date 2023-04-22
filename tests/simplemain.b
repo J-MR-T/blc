@@ -1,5 +1,5 @@
-// RUN: %blc -l %s %t && %t | FileCheck %s
-// RUN: %blc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | FileCheck %s
+// RUN: %FileCheckWithLLVMBackend %s
+// RUN: %FileCheckWithARMBackend %s
 
 println(){
     register fmt = calloc(2,1);

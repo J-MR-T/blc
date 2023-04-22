@@ -1,4 +1,5 @@
-// RUN: %blc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t1 - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t1 | FileCheck %s
+// RUN: %FileCheckWithLLVMBackend %s
+// RUN: %FileCheckWithARMBackend %s
 
 #include "lib.b"
 

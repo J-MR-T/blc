@@ -1,4 +1,4 @@
-// RUN: %blc -l %s %t-1; %blc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | diff -y <(%t-1) -
+// RUN: %compareBothBackends
 
 #include "lib.b"
 

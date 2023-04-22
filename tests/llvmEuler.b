@@ -1,3 +1,4 @@
+// check that the c program and this one produce the same output
 // RUN: cc %S/euler.c -o %t-euler && %blc -l %s %t && %t | diff - <(%t-euler)
 // RUN: %blc %s 2>&1 | not grep Warn
 

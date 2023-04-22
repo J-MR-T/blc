@@ -1,6 +1,6 @@
 // RUN: %blc -l %s %t && %t | FileCheck %s
 // RUN: %blc %s 2>&1 | not grep Warn
-// RUN: %blc -a %s | aarch64-linux-gnu-gcc -g -x assembler -o %t - && qemu-aarch64 -L /usr/aarch64-linux-gnu %t | FileCheck %s
+// RUN: %FileCheckWithARMBackend %s
 
 // CHECK-NOT: Warning
 main(){

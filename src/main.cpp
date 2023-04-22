@@ -2239,12 +2239,21 @@ namespace Codegen::LLVM::RegAlloc{
                     }else if(call->hasMetadata("reg")){
                         continue;
                     }else if(call->getCalledFunction() == instructionFunctions[ZExt_handled_in_Reg_Alloc]){
+                        // TODO the problem here is, that the assertion fails if we just replace the call with its operand, because of type problems. But actually we really want to do that, because we just want to treat the call, as though it's its op (i.e. loads get generated for the op, at the points of use of what is now the call)
+
                         // replace stuff with loads etc.
-                        allocator.tryGetAndRewriteInstruction(call, inst.getOperand(0));
+                        auto* op = inst.getOperand(0);
+
+                        llvm::AttrBuilder attrBuilder(ctx);
+
+                        assert((op->getType() == i64 || llvm::isa<llvm::PHINode>(op)) && "type mutation is only valid on phis");
+                        op->mutateType(i64); // this is a bit cheeky, but its fine, because the only thing that this might make invalid, is phis with i1 as type, and those get deleted very soon -> forgoes the type checks in the RAUW assertions
 
                         // replace the zext itself with the generated load
-                        inst.replaceAllUsesWith(inst.getOperand(0));
+                        inst.replaceAllUsesWith(op);
                         inst.eraseFromParent();
+
+                        // reset the instruction metadata on the op, because we're treating this load as a more 'high-levl' load, than the others, this is a load that completely replaces a value, whereas the others are just for 
                     }else if(!call->getCalledFunction()->hasMetadata("arm_instruction_function")){
                         allocator.functionCall(call);
                     }else{

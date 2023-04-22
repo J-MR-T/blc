@@ -94,23 +94,29 @@ Additional specifications:
 Example programs can be found in `bSamples`, as well as in the `tests` directory (partly contain duplicate programs)
 
 # Building
-Ensure `gcc`>=12 and LLVM 15 are installed and `llvm-config` is configured to use LLVM 15.
+Ensure `gcc`>=12, `cmake` and LLVM 16 are installed.
 
-To build, simply use `make`.
+To build, simply use `make`. This triggers the CMake based build system (the old `llvm-config` based Makefile has been retired, to make use of tablegen and other supplementary MLIR features more easily). The binary is located in `build/bin`.
 
-If you haven't installed LLVM 15 system-wide, either use `LLVM_CONFIG=/path/to/llvm-config make [...]` or `export LLVM_CONFIG=/path/to/llvm-config` and then `make -e [...]`.
+If you haven't installed LLVM 16 system-wide (or the build fails even though you have), either use `LLVM_BUILD_DIR=/path/to/llvm-config make -e [...]` or `export LLVM_CONFIG=/path/to/llvm-config` and then `make -e [...]`.
 
-A debug build with assertions and debuginfo is available through `make debug`
+A debug build with assertions and debuginfo is available through `make debug`.
 
 # Tests
 To run the tests using [`lit`, the LLVM Integrated Tester](https://www.llvm.org/docs/CommandGuide/lit.html) and [FileCheck](https://www.llvm.org/docs/CommandGuide/FileCheck.html), use `lit -svj1 .`. It is recommended to do this using the debug build, to utilize all assertions to catch internal errors. A `test` make target is available to do these steps automatically: `make test`.
 
-Note: Running the tests in parallel (i.e. without `-j1`) can give unexpected results.
+Depending on your distribution, these tools come either in a separate llvm-[16-]tools package, or with the main llvm package. You might need to alias or soft-link `FileCheck-16` to `FileCheck`, as some distributions use the former as the name for the binary. Additionally, use `pip install lit` to install all required python modules to use `lit`. More detailed instructions on this can be found here:
+- https://www.llvm.org/docs/TestingGuide.html
+- https://www.llvm.org/docs/CommandGuide/lit.html
+- https://www.llvm.org/docs/CommandGuide/FileCheck.html
+
+Note: Running the tests in parallel (i.e., without `-j1`) can give unexpected results.
 
 # Limitations
-
 - There is only one handwritten backend, targeting AArch64 (although there is an option to simply compile using LLVM as the backend).
 - The backend does not use a real proper IR (something like MIR etc.), but simply encodes instructions as calls to LLVM functions which represent instructions. This is obviously not ideal, but was done in order to save time and not have to design a whole new IR. Might be overhauled in the future.
-- The backend is not at all correct yet. The frontend seems to work pretty well, but the backend certainly has bugs, at least for the moment. This is still a heavy WIP.
+- The LLVM frontend is well-tested and should be correct in all but the most obscure edge cases.
+- The backend is mostly correct now. A few tests are failing due to the development of the MLIR frontend, which necessitated some structural changes, but this is being worked on.
+- The MLIR frontend is a WIP. Simple tests and files compile, and translate correctly into LLVM Dialect modules, and LLVM IR, but there is no automated testing implemented yet. The plan is to take all current tests and compare the output of the MLIR frontend to that of the LLVM frontend soon.
 
 

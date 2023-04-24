@@ -2957,7 +2957,7 @@ int main(int argc, char *argv[]) {
                 llvmModUP->print(llvmOut, nullptr);
             }else if(args.output()){
                 // llvm mod -> binary
-                int ret = llvmCompileAndLinkMod(*Codegen::LLVM::moduleUP);
+                int ret = llvmCompileAndLinkMod(*llvmModUP);
                 if(ret != 0)
                     return ret;
             }else{

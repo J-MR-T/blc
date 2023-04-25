@@ -95,11 +95,11 @@ def StoreOp : B_Op<"store">{
   let summary = "operation to store a value to a memory location";
 
   let description = [{
-    This operation is used to store a 64 bit value to a memory location.
+    This operation is used to store a width byte value to a memory location.
     The value is stored at the address specified by the pointer.
   }];
 
-  let arguments = (ins B_PointerType:$ptr, I64:$value);
+  let arguments = (ins B_PointerType:$ptr, I64:$value, I8Attr:$width);
 
   let results = (outs);
 }
@@ -108,11 +108,11 @@ def LoadOp : B_Op<"load", [Pure]>{
   let summary = "operation to load a value from a memory location";
 
   let description = [{
-    This operation is used to load a 64 bit value from a memory location.
+    This operation is used to load a width byte value from a memory location.
     The value is loaded from the address specified by the pointer.
   }];
 
-  let arguments = (ins B_PointerType:$ptr);
+  let arguments = (ins B_PointerType:$ptr, I8Attr:$width);
 
   let results = (outs I64:$result);
 }

@@ -19,6 +19,7 @@
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/Dialect.h>
+#include <llvm/Support/Debug.h>
 // pass stuff
 #include <mlir/Pass/PassManager.h>
 #include <mlir/Pass/Pass.h>
@@ -34,6 +35,7 @@
 #include <mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h>
 #include <mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h>
 #include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
+#include <mlir/Dialect/LLVMIR/LLVMTypes.h>
 
 #include "B/BDialect.h"
 #include "B/BOps.h"
@@ -117,6 +119,7 @@ public:
         ctx.getOrLoadDialect<mlir::func::FuncDialect>();
         ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
         ctx.getOrLoadDialect<mlir::arith::ArithDialect>();
+        ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
 
         builder.setInsertionPointToStart(mod.getBody());
 
@@ -314,7 +317,7 @@ public:
                 builder.setInsertionPoint(insertBB, insertPoint);
 
                 // store initializer
-                builder.create<mlir::b::StoreOp>(loc, alloca, initializer);
+                builder.create<mlir::b::StoreOp>(loc, alloca, initializer, 8);
             }else{
                 setRegisterVar(stmtNode, initializer);
             }
@@ -464,7 +467,7 @@ public:
 
                     auto alloca = mlir::dyn_cast<mlir::b::AllocaOp>(value.getDefiningOp());
                     assert(alloca && "auto variable must be an alloca");
-                    return builder.create<mlir::b::LoadOp>(loc, alloca);
+                    return builder.create<mlir::b::LoadOp>(loc, alloca, 8);
                 }
                 }
             case ASTNode::Type::NExprNum:
@@ -518,7 +521,7 @@ public:
                         // storing subscript
                         auto ptrAsInt = subscriptAddress(lhsNode);
                         auto ptr = builder.create<mlir::b::IntToPtrOp>(loc, ptrAsInt);
-                        builder.create<mlir::b::StoreOp>(loc, ptr, rhs);
+                        builder.create<mlir::b::StoreOp>(loc, ptr, rhs, lhsNode.value);
                     }else{
                         // normal assign
                         assert(lhsNode.type == ASTNode::Type::NExprVar && "lhs of assign must be a variable, should have been checked in SemanticAnalysis");
@@ -529,7 +532,7 @@ public:
                             assert(lhsNode.ident.type == IdentifierInfo::AUTO && "variable can only be auto or register");
 
                             auto alloca = autoVarmap[lhsNode.ident.uID];
-                            builder.create<mlir::b::StoreOp>(loc, alloca, rhs);
+                            builder.create<mlir::b::StoreOp>(loc, alloca, rhs, 8);
                         }
                     }
                     return rhs;
@@ -636,7 +639,7 @@ public:
                 {
                 auto ptrAsInt = subscriptAddress(exprNode);
                 auto ptr = builder.create<mlir::b::IntToPtrOp>(loc, ptrAsInt);
-                return builder.create<mlir::b::LoadOp>(loc, ptr);
+                return builder.create<mlir::b::LoadOp>(loc, ptr, exprNode.value);
                 }
             default:
                 break;
@@ -810,7 +813,10 @@ struct StoreOpLowering : public mlir::ConvertOpToLLVMPattern<mlir::b::StoreOp> {
     using ConvertOpToLLVMPattern<mlir::b::StoreOp>::ConvertOpToLLVMPattern;
 
     mlir::LogicalResult matchAndRewrite(mlir::b::StoreOp op, OpAdaptor adaptor, mlir::ConversionPatternRewriter& rewriter) const override{
-        rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(op, adaptor.getValue(), adaptor.getPtr());
+        // type is inferred through type of value
+        auto index = rewriter.create<mlir::LLVM::ConstantOp>(op.getLoc(), rewriter.getI64Type(), 0);
+        auto intType = rewriter.getIntegerType(adaptor.getWidth()*8);
+        rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(op, adaptor.getValue(), rewriter.create<mlir::LLVM::GEPOp>(op.getLoc(), getTypeConverter()->getPointerType(intType), intType, adaptor.getPtr(), mlir::ValueRange({index})));
         return mlir::success();
     }
 };
@@ -820,19 +826,28 @@ struct LoadOpLowering : public mlir::ConvertOpToLLVMPattern<mlir::b::LoadOp> {
     using ConvertOpToLLVMPattern<mlir::b::LoadOp>::ConvertOpToLLVMPattern;
 
     mlir::LogicalResult matchAndRewrite(mlir::b::LoadOp op, OpAdaptor adaptor, mlir::ConversionPatternRewriter& rewriter) const override{
-        rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(op, adaptor.getPtr());
+        auto load = rewriter.create<mlir::LLVM::LoadOp>(op.getLoc(), rewriter.getIntegerType(8*adaptor.getWidth()) /* explicit, because pointers are opaque */, adaptor.getPtr());
+        if(adaptor.getWidth()!=8)
+            rewriter.replaceOpWithNewOp<mlir::LLVM::ZExtOp>(op, rewriter.getIntegerType(64), load);
+        else
+            rewriter.replaceOp(op, load.getResult());
         return mlir::success();
     }
 };
 
 
 mlir::LogicalResult lowerToLLVM(mlir::ModuleOp mod) noexcept{
+    IFDEBUG(llvm::setCurrentDebugType("dialect-conversion")); // like debug-only=dialect-conversion
+
     mlir::MLIRContext& ctx = *mod.getContext();
     mlir::ConversionTarget target(ctx);
     target.addLegalDialect<mlir::LLVM::LLVMDialect>();
     target.addLegalOp<mlir::ModuleOp>();
 
     mlir::LLVMTypeConverter typeConverter(&ctx);
+    // TODO the b store op lowering has b pointer types, but the llvm store op lowering has llvm pointer types, so it will be consistent at the end, but there is probably a problem in the middle
+    assert(typeConverter.useOpaquePointers() && "opaque pointers are required for the lowering to llvm");
+    typeConverter.addConversion([&ctx](mlir::b::PointerType) { return mlir::LLVM::LLVMPointerType::get(&ctx,0); });
 
     mlir::RewritePatternSet patterns(&ctx);
     //mlir::populateSCFToControlFlowConversionPatterns(patterns);

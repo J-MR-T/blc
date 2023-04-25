@@ -1,6 +1,9 @@
 // RUN: %blc -l %s %t && %t | FileCheck %s
 // RUN: %blc %s 2>&1 | not grep Warn
 // RUN: %FileCheckWithARMBackend %s
+// RUN: %FileCheckWithLLVMBackend %s
+// RUN: %FileCheckWithMLIRBackend %s
+
 
 // CHECK-NOT: Warning
 main(){

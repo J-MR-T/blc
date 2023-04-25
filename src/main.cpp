@@ -45,6 +45,7 @@
 #include <llvm/IR/Dominators.h>
 #include <llvm/Analysis/CFG.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
+#include <llvm/Support/TargetSelect.h>
 #pragma GCC diagnostic pop
 
 #include <mlir/Target/LLVMIR/Export.h>
@@ -2921,7 +2922,8 @@ int main(int argc, char *argv[]) {
 
         if(args.mlir()){
             auto mlirCtx = mlir::MLIRContext();
-            auto [genSuccess, warnings, owningModRef] = Codegen::MLIR::generate(mlirCtx, *ast);
+            auto [genSuccessMLIR, warnings, owningModRef] = Codegen::MLIR::generate(mlirCtx, *ast);
+            genSuccess = genSuccessMLIR;
 
             if(!genSuccess){
                 llvm::errs() << "Module: \n";
@@ -2931,6 +2933,9 @@ int main(int argc, char *argv[]) {
                 goto continu;
             }
 
+            if(!args.interpret() && !args.llvm() && !args.output())
+                owningModRef->print(llvmOut);
+
             // mlir mod -> llvm mod
 
             mlir::registerLLVMDialectTranslation(mlirCtx);
@@ -2938,6 +2943,7 @@ int main(int argc, char *argv[]) {
             // my dialect soup mod -> llvm dialect mod
             if(failed(Codegen::MLIR::lowerToLLVM(*owningModRef))){
                 llvm::errs() << "Could not lower MLIR module to LLVM dialect :(\n";
+                owningModRef->dump();
                 goto continu;
             }
 
@@ -2947,6 +2953,7 @@ int main(int argc, char *argv[]) {
 
             if(!llvmModUP){
                 llvm::errs() << "Could not translate MLIR module to LLVM IR\n";
+                owningModRef->dump();
                 goto continu;
             }
 
@@ -2960,86 +2967,86 @@ int main(int argc, char *argv[]) {
                 int ret = llvmCompileAndLinkMod(*llvmModUP);
                 if(ret != 0)
                     return ret;
-            }else{
-                owningModRef->print(llvmOut);
             }
-            goto continu;
-        }
-
-        MEASURE_TIME_START(codegen);
-        genSuccess = Codegen::LLVM::generate(*ast);
-
-        if(!genSuccess){
-            llvm::errs() << "Generating LLVM-IR failed :(\nIndividual errors displayed above\n";
-            goto continu;
-        }
-        MEASURE_TIME_END(codegen);
-        codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
-
-        if(args.interpret()){
-            // TODO doesn't work
-
-            // instantiate an execution engine (kind interpreter) on the Codegen::LLVM::moduleUP
-            llvm::EngineBuilder builder(std::move(Codegen::LLVM::moduleUP));
-
-            std::string error;
-            llvm::TargetOptions options;
-
-            builder.setEngineKind(llvm::EngineKind::Interpreter);
-
-            builder.setErrorStr(&error);
-            builder.setOptLevel(llvm::CodeGenOpt::None);
-            builder.setTargetOptions(options);
-
-            auto engine = builder.create();
-            if(!engine){
-                llvm::errs() << "Could not create execution engine\n";
-                goto continu;
-            }
-
-            auto mainFunc = engine->getFunctionAddress("main");
-            if(!mainFunc){
-                llvm::errs() << "Could not find main function\n";
-                goto continu;
-            }
-
-            // call main
-            return reinterpret_cast<int(*)(int, char**)>(mainFunc)(0, nullptr);
-        }else if(args.output()){
-            int ret = llvmCompileAndLinkMod(*Codegen::LLVM::moduleUP);
-            if(ret != 0)
-                return ret;
-
         }else{
-            if(args.llvm())
-                Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+            MEASURE_TIME_START(codegen);
+            genSuccess = Codegen::LLVM::generate(*ast);
 
-            Codegen::LLVM::initInstructionFunctions();
+            if(!genSuccess){
+                llvm::errs() << "Generating LLVM-IR failed :(\nIndividual errors displayed above\n";
+                goto continu;
+            }
+            MEASURE_TIME_END(codegen);
+            codegenSeconds = MEASURED_TIME_AS_SECONDS(codegen, 1);
 
-            // isel
-            MEASURE_TIME_START(isel);
-            Codegen::LLVM::ISel::doISel();
-            MEASURE_TIME_END(isel);
-            iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
+            if(args.interpret()){
+                llvm::errs() << "Interpretation not yet implemented\n";
+                // TODO doesn't work
 
-            if(args.isel())
-                Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+                llvm::InitializeNativeTarget();
+                llvm::InitializeNativeTargetAsmPrinter();
 
-            // regalloc
-            MEASURE_TIME_START(regalloc);
-            Codegen::LLVM::RegAlloc::doRegAlloc();
-            MEASURE_TIME_END(regalloc);
-            regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
+                std::string error;
+                llvm::TargetOptions options;
 
-            if(args.regalloc())
-                Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+                // instantiate an execution engine (kind interpreter) on the Codegen::LLVM::moduleUP
+                llvm::EngineBuilder builder(std::move(Codegen::LLVM::moduleUP));
+                builder.setEngineKind(llvm::EngineKind::Interpreter);
 
-            // asm
-            MEASURE_TIME_START(asm);
-            (Codegen::LLVM::AssemblyGen(args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
-            MEASURE_TIME_END(asm);
-            asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
+                builder.setErrorStr(&error);
+                builder.setOptLevel(llvm::CodeGenOpt::None);
+                builder.setTargetOptions(options);
 
+                auto engine = builder.create();
+                if(!engine){
+                    llvm::errs() << "Could not create execution engine: " << error << "\n";
+                    goto continu;
+                }
+
+                auto mainFunc = engine->getFunctionAddress("main");
+                if(!mainFunc){
+                    llvm::errs() << "Could not find main function\n";
+                    goto continu;
+                }
+
+                // call main
+                return reinterpret_cast<int(*)(int, char**)>(mainFunc)(0, nullptr);
+            }else if(args.output()){
+                int ret = llvmCompileAndLinkMod(*Codegen::LLVM::moduleUP);
+                if(ret != 0)
+                    return ret;
+
+            }else{
+                if(args.llvm())
+                    Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+
+                Codegen::LLVM::initInstructionFunctions();
+
+                // isel
+                MEASURE_TIME_START(isel);
+                Codegen::LLVM::ISel::doISel();
+                MEASURE_TIME_END(isel);
+                iselSeconds = MEASURED_TIME_AS_SECONDS(isel, 1);
+
+                if(args.isel())
+                    Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+
+                // regalloc
+                MEASURE_TIME_START(regalloc);
+                Codegen::LLVM::RegAlloc::doRegAlloc();
+                MEASURE_TIME_END(regalloc);
+                regallocSeconds = MEASURED_TIME_AS_SECONDS(regalloc, 1);
+
+                if(args.regalloc())
+                    Codegen::LLVM::moduleUP->print(llvmOut, nullptr);
+
+                // asm
+                MEASURE_TIME_START(asm);
+                (Codegen::LLVM::AssemblyGen(args.asmout() ? &llvmOut : &devNull)).doAsmOutput();
+                MEASURE_TIME_END(asm);
+                asmSeconds = MEASURED_TIME_AS_SECONDS(asm, 1);
+
+            }
         }
     }
 continu:
@@ -3047,14 +3054,15 @@ continu:
     //print execution times
     if(args.benchmark()){
         std::cout
-        << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s\n"
-        << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s\n"
-        << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s\n"
-        << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s\n"
-        << "Average register allocation time: (over "   << 1          << " iterations): " << regallocSeconds                                  << "s\n"
-        << "Average assembly generation time: (over "   << 1          << " iterations): " << asmSeconds                                       << "s\n"
-        << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB\n";
+            << "Average parse time (over "                  << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(parse, iterations)      << "s\n"
+            << "Average semantic analysis time: (over "     << iterations << " iterations): " << MEASURED_TIME_AS_SECONDS(semanalyze, iterations) << "s\n"
+            << "Average codegeneration time: (over "        << 1          << " iterations): " << codegenSeconds                                   << "s\n"
+            << "Average instruction selection time: (over " << 1          << " iterations): " << iselSeconds                                      << "s\n"
+            << "Average register allocation time: (over "   << 1          << " iterations): " << regallocSeconds                                  << "s\n"
+            << "Average assembly generation time: (over "   << 1          << " iterations): " << asmSeconds                                       << "s\n"
+            << "AST Memory usage: "                         << 1e-6*(ast->getRoughMemoryFootprint())                                              << "MB\n";
     }
+
 
     if(!genSuccess) return ExitCode::ERROR_CODEGEN;
 

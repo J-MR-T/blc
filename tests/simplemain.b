@@ -1,10 +1,12 @@
 // RUN: %FileCheckWithLLVMBackend %s
 // RUN: %FileCheckWithARMBackend %s
+// RUN: %FileCheckWithMLIRBackend %s
 
 println(){
     register fmt = calloc(2,1);
     fmt[0@1] = 10;
     printf(fmt);
+    // TODO this free call trips up the llvm ir conversion for some reason
     free(fmt);
     return 0;
 }

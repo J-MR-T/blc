@@ -481,12 +481,9 @@ public:
                 if(bool isAnd = exprNode.op == Type::LOGICAL_AND; isAnd || exprNode.op == Type::LOGICAL_OR){
                     auto lhs = genExpr(lhsNode);
 
-                    
                     auto lhsBB  = builder.getInsertionBlock();
                     auto [rhsBB, contBB] = createBlocksAfterCurrent<2>();
-                    contBB->addArgument(i1, loc); // i1 arg, gets extended to i64 later
-
-                    auto contArg = contBB->getArgument(0);
+                    auto contArg = contBB->addArgument(i1, loc); // i1 arg, gets extended to i64 later
 
                     // know all predecessors of rhs, cont immediately -> seal
                     blockInfo[rhsBB].sealed = true;
@@ -498,7 +495,7 @@ public:
                     if(isAnd){
                         builder.create<mlir::cf::CondBranchOp>(loc, lhsCmp, rhsBB, mlir::ArrayRef<mlir::Value>(), contBB, mlir::ArrayRef<mlir::Value>(builder.create<ConstantIntOp>(loc, 0, i1)));
                     }else{
-                        builder.create<mlir::cf::CondBranchOp>(loc, lhsCmp, contBB, mlir::ArrayRef<mlir::Value>(builder.create<ConstantIntOp>(loc, 0, i1)), rhsBB, mlir::ArrayRef<mlir::Value>());
+                        builder.create<mlir::cf::CondBranchOp>(loc, lhsCmp, contBB, mlir::ArrayRef<mlir::Value>(builder.create<ConstantIntOp>(loc, 1, i1)), rhsBB, mlir::ArrayRef<mlir::Value>());
                     }
 
                     // rhs

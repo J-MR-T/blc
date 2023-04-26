@@ -844,8 +844,8 @@ mlir::LogicalResult lowerToLLVM(mlir::ModuleOp mod) noexcept{
     target.addLegalDialect<mlir::LLVM::LLVMDialect>();
     target.addLegalOp<mlir::ModuleOp>();
 
+    // needed for other conversions for the pre-existing dialect, as well as for the b::PointerType
     mlir::LLVMTypeConverter typeConverter(&ctx);
-    // TODO the b store op lowering has b pointer types, but the llvm store op lowering has llvm pointer types, so it will be consistent at the end, but there is probably a problem in the middle
     assert(typeConverter.useOpaquePointers() && "opaque pointers are required for the lowering to llvm");
     typeConverter.addConversion([&ctx](mlir::b::PointerType) { return mlir::LLVM::LLVMPointerType::get(&ctx,0); });
 
@@ -858,6 +858,44 @@ mlir::LogicalResult lowerToLLVM(mlir::ModuleOp mod) noexcept{
     patterns.add<AllocaOpLowering, IntToPtrOpLowering, PtrToIntOpLowering, StoreOpLowering, LoadOpLowering>(typeConverter);
 
     return mlir::applyFullConversion(mod, target, std::move(patterns));
+}
+
+/// MLIR automatically inserts malloc/free declarations in the llvmir dialect module -> LLVM IR module conversion. This is annoying, because it doesn't regard custom declarations for malloc/free
+void workaroundAutomaticFreeMallocdecls(mlir::ModuleOp mod) noexcept{
+    auto mallocDecl = mod.lookupSymbol<mlir::LLVM::LLVMFuncOp>("malloc");
+    auto freeDecl = mod.lookupSymbol<mlir::LLVM::LLVMFuncOp>("free");
+
+    mlir::OpBuilder builder(mod.getContext());
+    if(mallocDecl){
+        assert(mallocDecl.isDeclaration() && "custom malloc implementation will clash with automatically inserted declaration, wait for the bug to be fixed.");
+
+        auto mallocUsesOpt = mallocDecl.getSymbolUses(mod);
+        assert(mallocUsesOpt.has_value() && "declarations should only be inserted upon use");
+
+        for(auto mallocCallUse:*mallocUsesOpt){
+            auto mallocCall = mallocCallUse.getUser();
+
+            builder.setInsertionPoint(mallocCall);
+            auto mallocPtrToInt = builder.create<mlir::LLVM::PtrToIntOp>(mallocCall->getLoc(), builder.getIntegerType(64), mallocCall->getResult(0));
+            mallocCall->replaceAllUsesWith(mallocPtrToInt);
+        }
+    }
+
+    if(freeDecl){
+        //assert(freeDecl.isDeclaration() && "custom free implementation will clash with automatically inserted declaration, wait for the bug to be fixed.");
+
+        auto freeUsesOpt = freeDecl.getSymbolUses(mod);
+        assert(freeUsesOpt.has_value() && "declarations should only be inserted upon use");
+
+        for(auto freeCallUse: *freeUsesOpt){
+            auto freeCall = freeCallUse.getUser();
+
+            builder.setInsertionPoint(freeCall);
+            assert(freeCall->getResult(0).use_empty() && "free result should not be used");
+            auto intToPtr = builder.create<mlir::LLVM::IntToPtrOp>(freeCall->getLoc(), mlir::LLVMTypeConverter(mod.getContext()).getPointerType(builder.getIntegerType(64)), freeCall->getOperand(0));
+            freeCall->setOperand(0, intToPtr);
+        }
+    }
 }
 
 }; // end namespace Codegen::MLIR

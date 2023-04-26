@@ -11,4 +11,5 @@ namespace Codegen::MLIR{
     bool runCanonicalizer(mlir::ModuleOp mod) noexcept;
 
     mlir::LogicalResult lowerToLLVM(mlir::ModuleOp mod) noexcept;
+    void workaroundAutomaticFreeMallocdecls(mlir::ModuleOp mod) noexcept;
 }

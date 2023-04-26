@@ -2936,6 +2936,7 @@ int main(int argc, char *argv[]) {
             if(!args.interpret() && !args.llvm() && !args.output())
                 owningModRef->print(llvmOut);
 
+
             // mlir mod -> llvm mod
 
             mlir::registerLLVMDialectTranslation(mlirCtx);
@@ -2946,6 +2947,9 @@ int main(int argc, char *argv[]) {
                 owningModRef->dump();
                 goto continu;
             }
+
+            // At some point remove this, when the bug inserting malloc/free declarations automatically, is fixed
+            Codegen::MLIR::workaroundAutomaticFreeMallocdecls(*owningModRef);
 
             // llvm dialect mod -> llvm mod
             llvm::LLVMContext llvmCtx;

@@ -864,8 +864,6 @@ void workaroundAutomaticFreeMallocdecls(mlir::ModuleOp mod) noexcept{
 
     mlir::OpBuilder builder(mod.getContext());
     if(mallocDecl){
-        assert(mallocDecl.isDeclaration() && "custom malloc implementation will clash with automatically inserted declaration, wait for the bug to be fixed.");
-
         auto mallocUsesOpt = mallocDecl.getSymbolUses(mod);
         assert(mallocUsesOpt.has_value() && "declarations should only be inserted upon use");
 
@@ -879,8 +877,6 @@ void workaroundAutomaticFreeMallocdecls(mlir::ModuleOp mod) noexcept{
     }
 
     if(freeDecl){
-        //assert(freeDecl.isDeclaration() && "custom free implementation will clash with automatically inserted declaration, wait for the bug to be fixed.");
-
         auto freeUsesOpt = freeDecl.getSymbolUses(mod);
         assert(freeUsesOpt.has_value() && "declarations should only be inserted upon use");
 

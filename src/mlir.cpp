@@ -161,24 +161,9 @@ public:
     }
 
     inline void setBlockArgForPredecessor(mlir::Block* blockArgParent, mlir::Block* pred, mlir::BlockArgument blockArg, mlir::Value setTo){
+        // case distinction for every possible terminator, I prefer PHIs over block args
+
         auto* term = pred->getTerminator();
-        // TODO i can already see this not working, because of the difference in cf branches etc.
-        // maybe there is some kind of 'block arg user' interface/class? doesn't appear so...
-
-        // TODO yep, doesn't work
-        // I guess just make a case distinction for every possible branching terminator...
-
-        //IFDEBUG(
-        //    for(unsigned i = 0; i < pred->getNumSuccessors(); ++i){
-        //        auto* successor = pred->getSuccessor(i);
-        //        if(successor == successor)
-        //            assert(i == blockArg.getArgNumber() && "block arg number doesn't match successor index");
-        //    }
-        //)
-
-        //assert((term->getNumOperands() <= blockArg.getArgNumber() || term->getOperand(blockArg.getArgNumber()) == mlir::Value()) && "block arg already set");
-
-        // TODO no idea if this will harm performance, I hope it doesn't and gets optimized away
 
         // basically like an if expression
         auto getSuccessorOperands = [&]() -> mlir::SuccessorOperands {

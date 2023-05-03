@@ -1,6 +1,7 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/ConstantRange.h>
 #include <llvm/ADT/STLExtras.h>
+#include <llvm/Support/Debug.h>
 
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/Value.h>
@@ -19,7 +20,6 @@
 #include <mlir/IR/BuiltinOps.h>
 #include <mlir/IR/Builders.h>
 #include <mlir/IR/Dialect.h>
-#include <llvm/Support/Debug.h>
 // pass stuff
 #include <mlir/Pass/PassManager.h>
 #include <mlir/Pass/Pass.h>
@@ -36,6 +36,8 @@
 #include <mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h>
 #include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
 #include <mlir/Dialect/LLVMIR/LLVMTypes.h>
+#include <mlir/Bytecode/BytecodeReader.h>
+#include <mlir/Bytecode/BytecodeWriter.h>
 
 #include "B/BDialect.h"
 #include "B/BOps.h"
@@ -46,7 +48,7 @@
 #include "mlir/IR/PatternMatch.h"
 namespace{
     // include patterns from declarative rewrite framework
-#include "BCombine.inc"
+#include "BCombine.cpp.inc"
 }
 
 
@@ -115,11 +117,11 @@ public:
     llvm::DenseMap<mlir::Block*, ASTNode*> blockArgsToResolve{};
 
     Generator(mlir::MLIRContext& ctx, AST& ast) : ast(ast), ctx(ctx), builder(&ctx), loc(builder.getUnknownLoc()), mod(mlir::ModuleOp::create(loc)){ 
-        ctx.getOrLoadDialect<mlir::b::BDialect>();
-        ctx.getOrLoadDialect<mlir::func::FuncDialect>();
-        ctx.getOrLoadDialect<mlir::cf::ControlFlowDialect>();
-        ctx.getOrLoadDialect<mlir::arith::ArithDialect>();
-        ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
+        ctx.loadDialect<mlir::b::BDialect>();
+        ctx.loadDialect<mlir::func::FuncDialect>();
+        ctx.loadDialect<mlir::cf::ControlFlowDialect>();
+        ctx.loadDialect<mlir::arith::ArithDialect>();
+        ctx.loadDialect<mlir::LLVM::LLVMDialect>();
 
         builder.setInsertionPointToStart(mod.getBody());
 

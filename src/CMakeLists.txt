@@ -45,7 +45,7 @@ set(LIBS
 
 # tablegen for the combine patterns
 set(LLVM_TARGET_DEFINITIONS BCombine.td)
-mlir_tablegen(BCombine.inc -gen-rewriters)
+mlir_tablegen(BCombine.cpp.inc -gen-rewriters)
 add_public_tablegen_target(MLIRBCombineIncGen)
 
 # this solves the linker errors with the target specific initialize methods

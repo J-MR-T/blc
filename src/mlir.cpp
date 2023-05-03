@@ -163,25 +163,17 @@ public:
     }
 
     inline void setBlockArgForPredecessor(mlir::Block* blockArgParent, mlir::Block* pred, mlir::BlockArgument blockArg, mlir::Value setTo){
-        // case distinction for every possible terminator, I prefer PHIs over block args
-
-        auto* term = pred->getTerminator();
+        auto branch = mlir::dyn_cast<mlir::BranchOpInterface>(pred->getTerminator());
+        assert(branch && "unhandled terminator");
 
         // basically like an if expression
         auto getSuccessorOperands = [&]() -> mlir::SuccessorOperands {
-            if(auto branch = mlir::dyn_cast<mlir::cf::BranchOp>(term)){
-                return branch.getSuccessorOperands(0);
-            }else{
-                auto condBranch = mlir::dyn_cast<mlir::cf::CondBranchOp>(term);
-                assert(condBranch && "unhandled terminator");
-
-                for(auto [index, predSucc]: llvm::enumerate(condBranch.getSuccessors())){
-                    if(predSucc == blockArgParent){
-                        return condBranch.getSuccessorOperands(index);
-                    }
+            for(auto [index, predSucc]: llvm::enumerate(branch->getSuccessors())){
+                if(predSucc == blockArgParent){
+                    return branch.getSuccessorOperands(index);
                 }
-                assert(false && "successor not found");
             }
+            assert(false && "successor not found");
         };
         auto successorOperands = getSuccessorOperands();
         successorOperands.append(setTo);

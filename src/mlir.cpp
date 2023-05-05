@@ -116,7 +116,7 @@ public:
     llvm::DenseMap<mlir::Block*, BasicBlockInfo> blockInfo{};
     llvm::DenseMap<mlir::Block*, ASTNode*> blockArgsToResolve{};
 
-    Generator(mlir::MLIRContext& ctx, AST& ast) : ast(ast), ctx(ctx), builder(&ctx), loc(builder.getUnknownLoc()), mod(mlir::ModuleOp::create(loc)){ 
+    Generator(mlir::MLIRContext& ctx, AST& ast) : ast(ast), ctx(ctx), builder(&ctx), loc(builder.getUnknownLoc()), mod(mlir::ModuleOp::create(loc)){
         ctx.loadDialect<mlir::b::BDialect>();
         ctx.loadDialect<mlir::func::FuncDialect>();
         ctx.loadDialect<mlir::cf::ControlFlowDialect>();
@@ -816,8 +816,8 @@ mlir::LogicalResult lowerToLLVM(mlir::ModuleOp mod) noexcept{
     IFDEBUG(llvm::setCurrentDebugType("dialect-conversion")); // like debug-only=dialect-conversion
 
     mlir::MLIRContext& ctx = *mod.getContext();
-    mlir::ConversionTarget target(ctx);
-    target.addLegalDialect<mlir::LLVM::LLVMDialect>();
+    mlir::LLVMConversionTarget target(ctx);
+    // or: mlir::ConversionTarget ... plus target.addLegalDialect<mlir::LLVM::LLVMDialect>();
     target.addLegalOp<mlir::ModuleOp>();
 
     // needed for other conversions for the pre-existing dialect, as well as for the b::PointerType

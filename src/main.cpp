@@ -49,6 +49,7 @@
 #pragma GCC diagnostic pop
 
 #include <mlir/Target/LLVMIR/Export.h>
+#include <mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h>
 #include <mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h>
 
 #include "util.h"
@@ -2939,6 +2940,7 @@ int main(int argc, char *argv[]) {
 
             // mlir mod -> llvm mod
 
+            mlir::registerBuiltinDialectTranslation(mlirCtx);
             mlir::registerLLVMDialectTranslation(mlirCtx);
 
             // my dialect soup mod -> llvm dialect mod

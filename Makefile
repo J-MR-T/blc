@@ -2,6 +2,8 @@
 # override this using env var or directly in the Makefile
 LLVM_BUILD_DIR=~/programming/Libs/Cpp/llvm-project/build
 
+# just to jot it down somewhere: current llvm commit used: 583d492c6
+
 .phony: release debug makeCMakeBearable clean setup test
 
 release: setup

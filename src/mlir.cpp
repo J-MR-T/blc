@@ -630,17 +630,17 @@ public:
         auto fn = mod.lookupSymbol<mlir::func::FuncOp>(fnNode.ident.name);
 
         // no block by default
-        entryBB = &fn.getBody().emplaceBlock();
-        assert(fn.getBody().hasOneBlock() && "Function body doesn't have exactly one block");
-
+        entryBB = fn.addEntryBlock();
         blockInfo[entryBB].sealed = true;
 
         builder.setInsertionPointToStart(entryBB);
 
-        // generate parameters
+        assert(entryBB->getNumArguments() == paramListNode.children.size() && "number of parameters does not match function declaration");
+
+        // map parameters
         for(unsigned int i = 0; i < paramListNode.children.size(); ++i){
             auto& paramNode = paramListNode.children[i];
-            auto arg = entryBB->addArgument(i64, loc);
+            auto arg = entryBB->getArgument(i);
             setRegisterVar(paramNode, arg);
         }
 

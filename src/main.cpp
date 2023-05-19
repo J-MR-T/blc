@@ -1247,14 +1247,14 @@ namespace Codegen::LLVM::ISel{
             }
         ),
 
-#define TWO_OPERAND_INSTR_PATTERN(llvmInstr, armInstr)                                                           \
-        Pattern::make_root(                                                                                      \
-            [](llvm::IRBuilder<>& irb) -> llvm::Value* {                                                                          \
-                auto instr = &*irb.GetInsertPoint();                                                             \
+#define TWO_OPERAND_INSTR_PATTERN(llvmInstr, armInstr)                                                         \
+        Pattern::make_root(                                                                                    \
+            [](llvm::IRBuilder<>& irb) -> llvm::Value* {                                                       \
+                auto instr = &*irb.GetInsertPoint();                                                           \
                 return irb.CreateCall(instructionFunctions[armInstr], {OP_N_MAT(instr,0), OP_N_MAT(instr,1)}); \
-            },                                                                                                   \
-            llvm::Instruction::llvmInstr,                                                                        \
-            {}                                                                                                   \
+            },                                                                                                 \
+            llvm::Instruction::llvmInstr,                                                                      \
+            {}                                                                                                 \
         ),
 
         // shifted add/sub

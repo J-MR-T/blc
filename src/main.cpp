@@ -1924,13 +1924,12 @@ namespace Codegen::LLVM::RegAlloc{
     };
 
     /// as a macro, because as a function it doesn't work, because setMetadata is protected
-#define SET_REG_METADATA(val, reg)                                                               \
-        (val)->setMetadata("reg", llvm::MDNode::get(ctx,                                     \
+#define SET_REG_METADATA(val, reg)                                                              \
+        (val)->setMetadata("reg", llvm::MDNode::get(ctx,                                        \
             {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64, static_cast<int>(reg)))} \
         ));
 
-    /// the goal here is to write something that actually works, not to write something that is efficient. Because the thing above is a monstrous abomination and disaster
-    /// Currently not used anywhere, because that made an even bigger mess. I have to write this again from scratch if I really want to make it better.
+    /// the goal here is to write something that actually works, not to write something that is efficient. Because the previous register allocator was a monstrous abomination and disaster
     class StackRegisterAllocator{
     public:
         llvm::ValueMap<llvm::Value*, AllocatedStackslot> spillMap{};
@@ -1955,21 +1954,6 @@ namespace Codegen::LLVM::RegAlloc{
             auto [reg, load] = get(val);
             inst->replaceUsesOfWith(val, load);
             return true;
-        }
-
-        /// gets register for value known to be on the stack.
-        /// returns register and load instruction.
-        /// sets register metadata on the load instruction.
-        std::pair<AllocatedRegister, llvm::CallInst*> get(llvm::Value* val){
-            assert(isAllocated(val) && "value not on stack");
-            auto offset = spillMap[val].offset;
-            // offset has to be in doublewords, so multiply by 8 by shifting left by 3
-            auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
-            // don't try to spill load the args of this instr
-            llvmSetEmptyMetadata(load, "regAllocIgnore");
-            auto reg = nextRegister();
-            SET_REG_METADATA(load, reg); // set the register metadata on the load instruction
-            return {AllocatedRegister{val, reg}, load};
         }
 
         /// allocates a new stackslot for a new value not already on the stack.
@@ -2024,6 +2008,28 @@ namespace Codegen::LLVM::RegAlloc{
             allocate(call);
             return get(call).first;
         }
+    private:
+        Register nextReg = X0;
+
+        /// none of our instructions have more than 8 operands, so we can simply do this
+        Register nextRegister(){
+            return nextReg++;
+        }
+
+        /// gets register for value known to be on the stack.
+        /// returns register and load instruction.
+        /// sets register metadata on the load instruction.
+        std::pair<AllocatedRegister, llvm::CallInst*> get(llvm::Value* val){
+            assert(isAllocated(val) && "value not on stack");
+            auto offset = spillMap[val].offset;
+            // offset has to be in doublewords, so multiply by 8 by shifting left by 3
+            auto load = irb.CreateCall(instructionFunctions[ARM_ldr], {spillsAllocation, irb.getInt64(offset << 3)}, "l");
+            // don't try to spill load the args of this instr
+            llvmSetEmptyMetadata(load, "regAllocIgnore");
+            auto reg = nextRegister();
+            SET_REG_METADATA(load, reg); // set the register metadata on the load instruction
+            return {AllocatedRegister{val, reg}, load};
+        }
 
         void enlargeSpillsAllocation(unsigned by){
             spillsAllocation->setOperand(0,
@@ -2036,14 +2042,6 @@ namespace Codegen::LLVM::RegAlloc{
                 )
             );
         }
-
-        /// none of our instructions have more than 8 operands, so we can simply do this
-        Register nextRegister(){
-            return nextReg++;
-        }
-
-    private:
-        Register nextReg = X0;
     };
 
     void handlePhiChainsCycles(StackRegisterAllocator& allocator, llvm::iterator_range<llvm::BasicBlock::phi_iterator> phiNodes, llvm::DenseSet<llvm::PHINode*>& toEraseLater){

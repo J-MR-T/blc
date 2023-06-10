@@ -6,7 +6,6 @@ blc
 out
 .cache/**
 build/**
-tests/Output/**
 
 doc
 

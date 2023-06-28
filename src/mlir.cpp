@@ -114,7 +114,7 @@ public:
     llvm::DenseMap<uint64_t /* variable uid */, mlir::b::AllocaOp> autoVarmap{};
 
     llvm::DenseMap<mlir::Block*, BasicBlockInfo> blockInfo{};
-    llvm::DenseMap<mlir::Block*, ASTNode*> blockArgsToResolve{};
+    llvm::DenseMap<mlir::BlockArgument, ASTNode*> blockArgsToResolve{};
 
     Generator(mlir::MLIRContext& ctx, AST& ast) : ast(ast), ctx(ctx), builder(&ctx), loc(builder.getUnknownLoc()), mod(mlir::ModuleOp::create(loc)){
         ctx.loadDialect<mlir::b::BDialect>();
@@ -176,17 +176,25 @@ public:
             assert(false && "successor not found");
         };
         auto successorOperands = getSuccessorOperands();
-        successorOperands.append(setTo);
-        assert(successorOperands.size() == blockArgParent->getNumArguments() && successorOperands.size() - 1 == blockArg.getArgNumber() && "successor operands size doesn't match block arg count");
+        if(blockArg.getArgNumber() >= successorOperands.size()){
+            successorOperands.append(setTo);
+        }else{
+            successorOperands[successorOperands.getOperandIndex(blockArg.getArgNumber())] = setTo;
+        }
+
+
+
+        // this has to be <=, because we might be adding more operands, so this might not have reached the end yet
+        assert(successorOperands.size() <= blockArgParent->getNumArguments() && "successor operands size doesn't match block arg count");
     }
 
     // fills phi nodes with correct values, assumes block is sealed
     inline void fillBlockArgs(mlir::Block* block) noexcept{
         for(auto blockArg: block->getArguments()){
             for(auto* pred: block->getPredecessors()){
-                assert(blockArgsToResolve.find(block) != blockArgsToResolve.end() && "block arg not found in blockArgsToResolve");
+                assert(blockArgsToResolve.find(blockArg) != blockArgsToResolve.end() && "block arg not found in blockArgsToResolve");
 
-                setBlockArgForPredecessor(block, pred, blockArg, varmapLookup(pred, *blockArgsToResolve[block]));
+                setBlockArgForPredecessor(block, pred, blockArg, varmapLookup(pred, *blockArgsToResolve[blockArg]));
             }
         }
     }
@@ -258,7 +266,7 @@ public:
                 // if it isn't, we *have* to have a phi node/block arg, and fill it later
                 auto blockArg = block->addArgument(i64, loc);
 
-                blockArgsToResolve[block] = &node;
+                blockArgsToResolve[blockArg] = &node;
 
                 return regVarmap[node.ident.uID] = blockArg;
             }

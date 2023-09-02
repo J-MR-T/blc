@@ -2050,15 +2050,9 @@ namespace Codegen::LLVM::RegAlloc{
         }
 
         // allocate a stack slot for each phi
-        IFDEBUG(
-            unsigned phiCounter{0};
-            unsigned originalSize = allocator.spillMap.size();
-        )
         for(auto& phi : phiNodes){
             allocator.allocate(&phi, false);
-            IFDEBUG(phiCounter++);
         }
-        assert(originalSize + phiCounter == allocator.spillMap.size() && "phi stack slots not allocated correctly");
 
         llvm::IRBuilder<>& irb  = allocator.irb;
 
@@ -2121,11 +2115,13 @@ namespace Codegen::LLVM::RegAlloc{
                     {phi->getIncomingValueForBlock(bb), allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}
                 );
                 toHandle.erase(phi);
+                // TODO i think this is entirely unnecessary, because one phi can only ever read one other phi per edge, so we can just remove the one reader
                 for(auto reader: readBy[phi]){
                     numReaders[reader]--;
                 }
             };
 
+            // TODO we always take the beginning of the set, independent of the notChanged coutner, I'm not sure this can work
             unsigned notChangedCounter = 0;
             while(toHandle.size()>0 && notChangedCounter < toHandle.size()){
                 auto phi = *toHandle.begin();
@@ -2141,7 +2137,6 @@ namespace Codegen::LLVM::RegAlloc{
             // prevent cycles of length 1 (self edges) by handling them before by not adding readBy/readers entries for them
             if(toHandle.size() > 0){
 
-                // cycle
                 // temporarily save one of the phi nodes in the special register
                 auto phi = *toHandle.begin();
                 auto load = allocator.irb.CreateCall(instructionFunctions[ARM_ldr], {allocator.spillsAllocation, allocator.irb.getInt64(allocator.spillMap[phi].offset << 3)}, "phiCycleBreak");
@@ -2164,8 +2159,7 @@ namespace Codegen::LLVM::RegAlloc{
             }
         }
 
-        // replace all phis with loads from the stack
-        // NEW: remove phis, they will be replaced by loads later on
+        // remove phis, they will be replaced by loads later on
         for(auto& phi : llvm::make_early_inc_range(phiNodes)){
             phi.removeFromParent();
             // erase later on using this set:
